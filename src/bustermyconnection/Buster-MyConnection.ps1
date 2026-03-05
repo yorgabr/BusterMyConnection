@@ -62,68 +62,6 @@
     teams. Internal documentation and comments follow the same convention, ensuring the 
     codebase remains accessible to contributors regardless of their locale.
 #>
-#!/usr/bin/env pwsh
-
-<#
-.SYNOPSIS
-    Buster-MyConnection launches the CNTLM authentication proxy with intelligent setup 
-    capabilities and fallback to direct internet access.
-
-.DESCRIPTION
-    This script embodies a self-healing approach to CNTLM deployment on Windows. Rather 
-    than failing when components are missing, it proactively downloads and configures the 
-    necessary infrastructure. The script detects whether CNTLM is installed in the 
-    expected portable location, and if absent, retrieves the latest stable build from the 
-    community-maintained repository. Should the configuration file be missing, it engages 
-    the user in a guided interview to establish the essential proxy settings.
-
-    The script implements a stateful connection management system that tracks whether
-    the previous execution was in "direct access" mode (proxy variables unset). When
-    transitioning back to a proxied environment (VPN active, corporate network detected),
-    it automatically restores the appropriate proxy environment variables before 
-    attempting CNTLM startup.
-
-    A health-check mechanism validates the upstream proxy server declared in cntlm.ini. 
-    If the parent proxy is unreachable, the script gracefully degrades by removing all 
-    proxy-related environment variables, allowing direct internet access. This prevents 
-    connectivity deadlocks when the corporate proxy infrastructure is unavailable.
-
-    The decorator-based VPN detection system allows seamless extension for different 
-    VPN clients. Currently implemented for BIG-IP Edge Client VPN environments. When a VPN
-    is detected with an active proxy, the script ensures environment variables are 
-    reconciled and validates connectivity before starting CNTLM.
-
-    The -JustCheck switch provides a comprehensive diagnostic mode that inspects the
-    current CNTLM instance (if running), analyzes its configuration, and performs
-    connectivity tests without making any changes to the system. This is useful for
-    troubleshooting and health monitoring.
-
-    The script operates idempotently, allowing repeated execution without side effects,
-    and can manage existing CNTLM processes through the KeepExisting switch. All output
-    respects the Quiet flag for automation scenarios, and comprehensive logging ensures
-    operational transparency.
-
-.EXAMPLE
-    Buster-MyConnection
-    Executes with defaults, triggering auto-installation and configuration wizard if needed.
-    If upstream proxy is dead, unsets proxy vars and exits with code 0 (direct access mode).
-    If transitioning from direct mode back to proxy mode, restores environment variables.
-
-.EXAMPLE
-    Buster-MyConnection -JustCheck
-    Performs comprehensive diagnostics only: checks for running CNTLM, analyzes 
-    configuration, and tests connectivity. No changes are made to the system.
-
-.EXAMPLE
-    Buster-MyConnection -IniPath "C:\Tools\cntlm.ini" -KeepExisting
-    Uses an alternate configuration while preserving any running CNTLM instances.
-
-.NOTES
-    All user-facing messages and logs are emitted in English to maintain consistency 
-    across international environments and facilitate troubleshooting in heterogeneous 
-    teams. Internal documentation and comments follow the same convention, ensuring the 
-    codebase remains accessible to contributors regardless of their locale.
-#>
 [CmdletBinding()]
 param(
     [string]$IniPath = (Join-Path -Path $HOME -ChildPath 'cntlm.ini'),
@@ -141,6 +79,12 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+#------------------------------
+# Script Metadata
+#------------------------------
+$SCRIPT_VERSION = '2.1.0'
+$SCRIPT_NAME = 'Buster-MyConnection'
 
 #------------------------------
 # Color helpers for rich console output 
