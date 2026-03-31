@@ -399,6 +399,277 @@ Contribute with empathy for the next developer who inherits your corporate netwo
 
 ---
 
+## Versioning and Commit Message Standards
+
+This project follows strict conventions for versioning and commit messages. These conventions are not bureaucratic overhead; they are part of how we keep the system maintainable, predictable, and safe to evolve over time—especially as the number of contributors grows.
+
+Before making your first contribution, please read this section carefully. Following these standards ensures that your changes integrate cleanly with the rest of the system and that future maintainers (including yourself) can easily understand the project’s history.
+
+---
+
+### Semantic Versioning (SemVer)
+
+This project uses **Semantic Versioning**, commonly known as **SemVer**, to communicate changes in a consistent and predictable way.
+
+A semantic version is composed of three numbers:
+
+    MAJOR.MINOR.PATCH
+
+Each number has a very specific meaning.
+
+The **PATCH** version is incremented when a change fixes a bug without altering the external behavior or contract of the system. From a user’s perspective, everything works the same way, except that something broken now works correctly.
+
+The **MINOR** version is incremented when new functionality is added in a backward‑compatible way. Existing users do not need to change anything, but they gain new capabilities.
+
+The **MAJOR** version is incremented when a change breaks backward compatibility. This usually means APIs were removed, renamed, or their behavior changed in a way that requires users or dependent systems to adjust their code.
+
+For example:
+
+*   `1.4.2 → 1.4.3` indicates a bug fix.
+*   `1.4.2 → 1.5.0` indicates a new feature.
+*   `1.4.2 → 2.0.0` indicates a breaking change.
+
+The commit message conventions described below are designed to map directly to these version changes. When commits are written correctly, tools and maintainers can reliably infer how the version should evolve.
+
+---
+
+### Commit Messages and Conventional Commits
+
+All commits in this repository must follow the **Conventional Commits** specification. This is a simple, structured format that makes commit history readable by humans and machines alike.
+
+At its most basic, a commit message follows this structure:
+
+```text
+type(scope): short description
+```
+
+The `type` describes the kind of change being made. The optional `scope` indicates *where* in the system the change applies. The description is written in the **imperative mood**, as if you were giving an instruction to the codebase.
+
+Think of a commit message as answering the question:  
+**“If this commit is applied, what will the system do?”**
+
+Avoid vague messages such as “updates”, “fixes”, or “changes”. A future maintainer should be able to understand *why* a change exists just by reading the commit history.
+
+---
+
+### Allowed Commit Types and Their Meaning
+
+#### `feat`: New functionality
+
+Use `feat` when introducing new, user‑visible functionality. A feature commit adds behavior that did not exist before and does so without breaking existing usage.
+
+Example:
+
+```text
+feat: add JSON export support
+```
+
+With a scope:
+
+```text
+feat(api): add endpoint for bulk export
+```
+
+A `feat` commit implies a **MINOR** version bump.
+
+---
+
+#### `fix`: Bug fixes and hotfixes
+
+Use `fix` when correcting incorrect or unintended behavior. This includes both regular bug fixes and urgent production hotfixes.
+
+There is no separate `hotfix` commit type. Urgency is communicated through the description or scope, not the type itself.
+
+Example:
+
+```text
+fix: correct tax calculation for negative values
+```
+
+For a production hotfix:
+
+```text
+fix(hotfix): prevent crash when session expires
+```
+
+A `fix` commit implies a **PATCH** version bump.
+
+---
+
+#### `refactor`: Internal restructuring
+
+Use `refactor` when changing the internal structure of the code without altering its observable behavior. Refactoring improves readability, maintainability, or design, but does not add features or fix bugs.
+
+Example:
+
+```text
+refactor: simplify validation logic
+```
+
+With scope:
+
+```text
+refactor(auth): extract token parsing logic
+```
+
+Refactor commits do not change the semantic version on their own.
+
+---
+
+#### `perf`: Performance improvements
+
+Use `perf` when changing code specifically to improve performance, such as reducing memory usage or speeding up execution, without changing behavior.
+
+Example:
+
+```text
+perf: reduce memory allocation during serialization
+```
+
+With scope:
+
+```text
+perf(db): optimize query for large datasets
+```
+
+Performance commits typically imply a **PATCH** version bump.
+
+---
+
+#### `docs`: Documentation changes
+
+Use `docs` for changes that affect only documentation. These commits should not modify production code behavior.
+
+Example:
+
+```text
+docs: add setup instructions to README
+```
+
+With scope:
+
+```text
+docs(api): document authentication flow
+```
+
+Documentation commits do not affect the version.
+
+---
+
+#### `test`: Tests only
+
+Use `test` when adding, updating, or fixing tests without modifying production code.
+
+Example:
+
+```text
+test: add coverage for edge cases in parser
+```
+
+With scope:
+
+```text
+test(auth): add tests for token expiration
+```
+
+Test commits do not affect the version.
+
+---
+
+#### `chore`: Maintenance and tooling
+
+Use `chore` for maintenance tasks that do not affect application behavior. This includes dependency updates, scripts, formatting tools, and repository housekeeping.
+
+Example:
+
+```text
+chore: update development dependencies
+```
+
+With scope:
+
+```text
+chore(lint): tighten formatting rules
+```
+
+Chore commits do not affect the version.
+
+---
+
+#### `build`: Build system changes
+
+Use `build` when modifying the build process, packaging, or compilation configuration.
+
+Example:
+
+```text
+build: update Docker image base version
+```
+
+With scope:
+
+```text
+build(ci): adjust build matrix for ARM
+```
+
+Build commits do not affect the version directly.
+
+---
+
+#### `ci`: Continuous integration configuration
+
+Use `ci` when changing CI/CD configuration files or pipeline behavior.
+
+Example:
+
+```text
+ci: add cache to GitHub Actions
+```
+
+With scope:
+
+```text
+ci(release): automate tag creation
+```
+
+CI commits do not affect the version.
+
+---
+
+#### `revert`: Reverting a previous commit
+
+Use `revert` when undoing a previously applied commit. Git usually generates this automatically.
+
+Example:
+
+```text
+revert: feat: add JSON export support
+```
+
+---
+
+### Breaking Changes
+
+If a commit introduces a change that breaks backward compatibility, it must be explicitly marked as a breaking change. This can be done by adding an exclamation mark (`!`) after the commit type.
+
+Example:
+
+```text
+feat!: remove legacy XML export
+```
+
+Alternatively, breaking changes may be explained in the commit footer using the phrase `BREAKING CHANGE:` followed by a clear explanation.
+
+Any breaking change requires a **MAJOR** version bump.
+
+---
+
+## Final Notes for Contributors
+
+A well‑written commit message is a form of documentation. Someone troubleshooting production issues or planning a migration months from now will rely on commit history to understand how the system evolved.
+
+When in doubt, prefer clarity over brevity, and precision over convenience. If your commit message reads naturally as a short instruction to the codebase, you are likely doing it right.
+
 ## Questions and Support
 
 Open an issue for:
