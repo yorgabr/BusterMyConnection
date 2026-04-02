@@ -1,6 +1,6 @@
 # BusterMyConnection
 
-![Banner](docs/images/banner.gif)
+![Banner](docs/images/banner.webp)
 
 ![CI](https://github.com/yorgabr/bustermyconnection/workflows/CI/badge.svg)
 ![PowerShell](https://img.shields.io/badge/PowerShell-5.1%2B-blue.svg)
