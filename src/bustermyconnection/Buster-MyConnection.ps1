@@ -277,7 +277,7 @@ function Remove-ProxyEnvironmentVariables {
 function Restore-ProxyEnvironmentVariables {
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory=$true)]
+        [Parameter(Mandatory = $true)]
         [hashtable]$Variables
     )
 
@@ -290,18 +290,26 @@ function Restore-ProxyEnvironmentVariables {
     $restoredCount = 0
 
     foreach ($varName in $Variables.Keys) {
+        $value = $Variables[$varName]
+
+        if ($null -eq $value) {
+            Out-Warn "Skipping restore of ${varName}: value is null"
+            continue
+        }
+
         try {
-            [Environment]::SetEnvironmentVariable($varName, $Variables[$varName], 'Process')
+            [Environment]::SetEnvironmentVariable($varName, $value, 'Process')
             Out-Info "Restored: $varName"
             $restoredCount++
         }
         catch {
-            Out-Warn "Failed to restore $varName`: $($_.Exception.Message)"
+            Out-Warn "Failed to restore ${varName}: $($_.Exception.Message)"
         }
     }
 
     return $restoredCount
 }
+
 #------------------------------
 # Connectivity Testing
 #------------------------------
@@ -969,7 +977,7 @@ function Install-CntlmPortable {
         $releaseUrl = "https://api.github.com/repos/versat/cntlm/releases/latest"
 
         Out-Info "Querying latest release information from GitHub..."
-        $release = Invoke-RestMethod -Uri $releaseUrl -UseBasicParsing
+        $release = Invoke-RestMethod -Uri $releaseUrl -Headers @{ 'User-Agent' = 'Buster-MyConnection' }
 
         $asset = $release.assets | Where-Object {
             $_.name -match 'windows.*\.zip$' -or $_.name -match 'win.*\.zip$'
