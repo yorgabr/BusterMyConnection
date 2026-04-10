@@ -1,163 +1,103 @@
 # BusterMyConnection
 
-![Banner](docs/images/banner.webp)
+docs/images/banner.webp  
+CI
+<https://img.shields.io/badge/PowerShell-5.1%2B-blue.svg>
+Platform
+<https://img.shields.io/badge/License-GPL--3.0-green.svg>
 
-![CI](https://github.com/yorgabr/bustermyconnection/workflows/CI/badge.svg)
-![PowerShell](https://img.shields.io/badge/PowerShell-5.1%2B-blue.svg)
-![Platform](https://img.shields.io/badge/Platform-Windows-lightgrey.svg)
-![License](https://img.shields.io/badge/License-GPL--3.0-green.svg)
+## The Self‑Healing CNTLM Launcher for Windows
 
-## The Self-Healing CNTLM Launcher for Windows
+There comes a moment in every Windows developer’s life when corporate proxy servers cease to be a background nuisance and become an active impediment to productivity. CNTLM may be correctly configured, authentication may be valid, and yet a single environmental change — a VPN reconnect, a PAC file injected by a local agent, or an upstream proxy outage — is enough to bring every tool to a grinding halt.
 
-There comes a moment in every Windows developer's life when corporate proxy servers transform from mere inconveniences into full-blown productivity killers. You have meticulously configured CNTLM to bridge the gap between your tools and the outside world, only to find yourself tethered to a VPN client that speaks its own peculiar dialect of proxy configuration. Or worse, you arrive at the office to discover the upstream proxy has vanished into the digital ether, leaving your carefully crafted setup hanging in the void, timing out every request until even the simplest `pip|npm|apt|yum|winget install` becomes an exercise in patience. If this is not enough, think about CI lifecycle automation...
+**Buster‑MyConnection** exists to confront this fragility head‑on.
 
-**Buster-MyConnection** was born from these exact frustrations. It is not merely a wrapper around the venerable CNTLM authentication proxy, it is an intelligent orchestration layer that understands the messy reality of modern corporate networking. The script embodies a philosophy of graceful degradation and self-healing automation. When components are missing, it does not surrender with obscure error messages. Instead, it downloads, installs, and configures them. When the network environment shifts beneath your feet, as it inevitably does when VPN clients engage, it detects these changes and reconciles your configuration accordingly. And when the fundamental infrastructure fails — the corporate proxy itself refusing connections — it makes the bold but necessary choice to step aside entirely, clearing the path for direct internet access rather than perpetuating a deadlock.
+This script is not merely a CNTLM launcher. It is an orchestration layer that understands that real corporate networks are unstable systems. Proxies fail. VPNs override configuration. Environment variables linger longer than they should. And developers are often left debugging symptoms instead of causes.
 
-This is a tool designed for developers who refuse to let network architecture dictate their workflow. It respects your time by operating idempotently, allowing repeated execution without side effects. It honors your preferences through comprehensive quiet-mode support for automation scenarios. And it maintains transparency through detailed logging, ensuring that when things do go awry, you possess the diagnostic information necessary to understand why.
+Buster‑MyConnection adopts a different philosophy: *graceful degradation* backed by memory. When the proxy is healthy, it enables CNTLM and ensures the environment is correctly configured. When the proxy is dead, it decisively steps aside — removing proxy environment variables, enabling direct internet access, and preserving enough state to recover later without user intervention.
 
----
+The result is not cleverness for its own sake, but continuity. Tools continue to work. Transitions feel intentional rather than accidental. And the script can be run repeatedly, safely, without fear of accumulating side effects.
+
+***
 
 ## The Architecture of Resilience
 
-At its heart, Buster-MyConnection implements a sophisticated decision tree that evaluates the health of your networking stack before committing to action. The process begins with infrastructure verification: is CNTLM itself present? If not, the script reaches out to the community-maintained repository, retrieves the latest stable build, and establishes a portable installation that requires no administrative privileges and leaves no registry footprint. This self-healing capability means you can drop the script onto any Windows machine and expect it to bootstrap its own dependencies.
+At its core, Buster‑MyConnection follows a structured decision process.
 
-Next comes configuration resolution. The script searches for your `cntlm.ini` file in standard locations, falling back to an interactive wizard when none exists. This wizard does not merely collect parameters, it educates! It explains the security implications of password storage, offers to generate NTLM hashes rather than accepting plaintext, and validates your inputs to prevent the subtle errors that plague proxy configurations. The resulting configuration includes sensible defaults for local listening ports, bypass patterns for internal addresses, and comments guiding future manual edits.
+**First**, it verifies infrastructure. If CNTLM is not present in its expected portable location, the script retrieves the latest stable Windows build from the community‑maintained repository and performs a user‑local installation that requires no administrative privileges and leaves no registry footprint.
 
-The critical juncture arrives with the upstream proxy health check. Before starting CNTLM and potentially subjecting your applications to connection timeouts, the script attempts a TCP connection to the proxy server declared in your configuration. This is not a mere ping, it validates that the specific port and protocol your applications will use is actually responsive. If this check fails (if the proxy is down, if you are working remotely without VPN access or if the network infrastructure has failed) the script makes the counterintuitive but correct choice: it *does not* start CNTLM! Instead, it removes all proxy-related environment variables from your current session, enabling direct internet access. It then exits cleanly, having transformed a potential hour of debugging into a momentary inconvenience. Run the script again when connectivity returns, and CNTLM resumes its role without fuss.
+**Second**, it resolves configuration. An existing `cntlm.ini` is located via explicit path or discovery. If none exists, the script launches an interactive wizard that validates input, explains security trade‑offs, and produces a usable, well‑commented configuration file with sensible defaults.
 
-For those navigating the labyrinthine world of corporate VPNs, Buster-MyConnection offers a particularly elegant solution. Through the **Decorator Pattern**, the script implements a chain of responsibility for VPN detection. Each decorator in the chain attempts to identify a specific VPN client: BIG-IP Edge Client, Cisco AnyConnect, FortiClient, or your own custom implementation. When a VPN is detected, the decorator provides not just identification but a reconciliation strategy: a script block that updates your CNTLM configuration to match the VPN's proxy requirements. This architecture means extending support for new VPN clients requires no modification to existing code, you simply add a new decorator to the chain.
+**Third**, it evaluates viability. Before starting CNTLM, the script performs a TCP health check against the upstream proxy declared in the configuration. This check is deliberate: the goal is not to confirm general network availability, but to validate that the specific proxy endpoint CNTLM depends upon is actually responsive.
 
----
+If the upstream proxy is unreachable, Buster‑MyConnection chooses restraint. CNTLM is *not* started. Instead, all proxy‑related environment variables are removed from the current process scope, enabling direct internet access and preventing application‑level deadlocks. The removal is not destructive: the original values are captured and persisted for later restoration.
 
-## Installation and Usage
+When connectivity returns — whether through VPN reconnection or proxy recovery — a subsequent execution detects the prior Direct Access state and restores the saved variables automatically.
 
-### Prerequisites
+***
 
-Buster-MyConnection requires PowerShell 5.1 or later, including PowerShell Core 6/7+. It functions on Windows 10, Windows 11, and Windows Server 2016+. No administrative privileges are required for standard operation, as the script maintains a user-local portable installation of CNTLM.
+## VPN Detection as a Chain of Responsibility
 
-### Quick Start
+Corporate VPNs frequently alter proxy behavior in subtle, vendor‑specific ways. Buster‑MyConnection addresses this variability through a **chain‑based detection system** implemented using plain PowerShell functions.
 
-The simplest invocation requires no arguments:
+Each detector in the chain attempts to recognize a specific VPN client (such as BIG‑IP Edge Client or Cisco AnyConnect) using reliable environmental indicators — registry values, local PAC servers, or running processes. When a detector succeeds, it returns a structured result that includes both identification and a reconciliation action.
 
-```powershell
-.\Buster-MyConnection.ps1
-```
+That action is a script block, executed only when standard operation is intended, which updates `cntlm.ini` to reflect the effective system proxy configuration introduced by the VPN. If a detector fails, responsibility passes transparently to the next detector in the chain.
 
-This command triggers the full intelligence of the script. If CNTLM is absent, it installs. If configuration is missing, it interviews you. If the upstream proxy is dead, it falls back to direct access. If BIG-IP Edge Client is active, it reconciles the proxy settings. The script exits with code `0` on success (including intentional fallback to direct access) and non-zero codes only for genuine errors.
+This design is intentionally extensible: adding support for a new VPN does not require modifying existing detectors. You simply insert a new function into the chain.
 
-You can also do:
+***
 
-```powershell
-# Diagnostic mode only—check status without making changes
-.\Buster-MyConnection.ps1 -JustCheck
+## State Persistence and Recovery
 
-# Health check with custom timeout
-.\Buster-MyConnection.ps1 -JustCheck -CheckTimeoutSeconds 60
-```
+One of the script’s most consequential behaviors occurs during failure.
 
-### Command-Line Options
+When Buster‑MyConnection determines that proxy mode is unsafe, it transitions explicitly into **Direct Access mode**. Before removing any proxy environment variables, it captures a snapshot of all proxy‑related entries present in the current process. That snapshot is serialized and stored under:
 
-For scenarios requiring more control:
+    %LOCALAPPDATA%\Buster-MyConnection\state.json
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `-IniPath` | `$HOME\cntlm.ini` | Path to CNTLM configuration file |
-| `-CntlmPath` | `$env:LOCALAPPDATA\Programs\CNTLM\cntlm.exe` | Path to CNTLM executable |
-| `-LogDirectory` | `$env:TEMP` | Directory for CNTLM log files |
-| `-KeepExisting` | `$false` | Allow concurrent CNTLM instances |
-| `-Quiet` | `$false` | Suppress non-error console output |
-| `-ProxyTestTimeoutSeconds` | `5` | Timeout for upstream proxy health check |
-| `-ProxyTestPort` | `80` | Port for TCP connectivity test |
-| `-DirectAccessTestTimeoutSeconds` | `10` | Timeout for direct internet validation |
-| `-JustCheck` | `$false` | Diagnostic mode: inspect only, no changes |
-| `-CheckTimeoutSeconds` | `30` | Timeout for curl connectivity tests (check mode) |
-| `-CheckRetries` | `2` | Retry attempts for connectivity tests (check mode) |
+On subsequent runs, the script consults this state file. If the previous execution was in Direct Access mode and proxy operation is again viable, the original environment variables are restored before CNTLM is started.
 
-### Examples
+This mechanism ensures symmetry: every automatic removal has a corresponding, automatic restoration. The script remembers not only *what* it did, but *how to undo it*.
 
-**Using an alternate configuration:**
+***
 
-```powershell
-.\Buster-MyConnection.ps1 -IniPath "C:\Tools\cntlm-work.ini"
-```
+## Diagnostic‑Only Operation: `-JustCheck`
 
-**Preserving existing CNTLM processes:**
+There are moments when insight is required but change is not desired. For these cases, Buster‑MyConnection provides a comprehensive diagnostic mode via the `-JustCheck` switch.
 
-```powershell
-.\Buster-MyConnection.ps1 -KeepExisting
-```
+In this mode, the script performs:
 
-**Silent execution for automation:**
+*   Process discovery for CNTLM on the target listening port
+*   Configuration discovery and parsing of the active `cntlm.ini`
+*   Validation of required directives and authentication posture
+*   HTTP and HTTPS connectivity checks via `curl`, with timeouts and retries
 
-```powershell
-.\Buster-MyConnection.ps1 -Quiet
-if ($LASTEXITCODE -ne 0) { 
-    Write-Error "CNTLM startup failed" 
-}
-```
+No remediation actions are taken. No configuration is altered. The script reports what it finds, then exits.
 
-**Comprehensive diagnostics (read-only):**
+This makes `-JustCheck` suitable for automation pipelines, pre‑deployment health checks, and troubleshooting scenarios where understanding must precede intervention.
 
-```powershell
-.\Buster-MyConnection.ps1 -JustCheck -Verbose
-```
----
+***
 
-## Understanding the VPN Decorator Architecture
+## Exit Codes
 
-The decorator pattern implementation represents the script's most sophisticated architectural feature. In object-oriented design, the decorator pattern allows behavior to be added to individual objects dynamically without affecting the behavior of other objects from the same class. Buster-MyConnection adapts this concept to PowerShell's class-based syntax to create an extensible VPN detection system.
+| Code | Meaning                                                               |
+| ---: | --------------------------------------------------------------------- |
+|    0 | Success (CNTLM started or Direct Access mode intentionally activated) |
+|    1 | General failure or failed validation                                  |
+|    2 | Configuration wizard failure                                          |
+|    3 | CNTLM installation failure                                            |
 
-The foundation is the `IVpnDetector` interface, which defines a single method: `Detect()`. This method returns a `VpnDetectionResult` object containing four critical properties: whether a VPN is active, the type of VPN detected, a human-readable description, and a script block containing the reconciliation logic.
+***
 
-The `BaseVpnDetector` class implements this interface as a sentinel. It always returns `IsVpnActive = $false`, serving as the terminus of the decorator chain. When no VPN is detected by any decorator, this sentinel value propagates back through the chain.
+## Philosophy
 
-Concrete decorators wrap this base. The `BigIpVpnDetector`, for instance, examines the Windows registry for AutoConfigURL settings pointing to `127.0.0.1` on ports in the 4470-4579 range — the distinctive fingerprints of the BIG-IP Edge Client. If found, it returns an active result with a reconciliation script block that invokes `Set-CntlmParentProxyFromSystem`. If not found, it delegates to its wrapped detector, allowing the chain to continue.
+Buster‑MyConnection rejects the idea that network tooling must be brittle. Failure is inevitable; deadlocks are not.
 
-This design achieves **open/closed principle** perfection: the system is open for extension (new VPN types can be added) but closed for modification (existing code need not change). Adding support for a new VPN client requires only creating a class that implements `IVpnDetector` and inserting it into the chain built by `New-VpnDetectionChain`.
+When the proxy fails, the script does not linger in a half‑functional state. When a VPN overrides configuration, it reconciles rather than resists. When the environment stabilizes, it restores what it removed without requiring the user to remember what changed.
 
----
+It is infrastructure that understands its purpose is to *disappear when working correctly* — and to explain itself clearly when it does not.
 
-## Exit Codes and Diagnostics
+***
 
-Buster-MyConnection communicates its outcome through exit codes:
-
-| Code | Meaning |
-|------|---------|
-| `0` | Success: CNTLM started normally, or direct access mode activated (proxy dead) |
-| `1` | General failure: CNTLM process did not persist, or unexpected error |
-| `2` | Configuration wizard failed |
-| `3` | CNTLM installation failed |
-
-When troubleshooting, examine the log file specified in the script output. The script generates timestamped logs in your TEMP directory by default, capturing CNTLM's verbose output for post-mortem analysis.
-
----
-
-## The Philosophy of Graceful Degradation
-
-Network tooling often suffers from binary thinking: either everything works perfectly, or everything fails catastrophically. Buster-MyConnection rejects this dichotomy. It recognizes that corporate networks are messy, that VPN clients are idiosyncratic, that proxy servers occasionally fail, and that developers need tools which adapt to these realities rather than crumbling before them.
-
-When the upstream proxy dies, the script does not spam you with connection timeout errors. It does not leave CNTLM running as a zombie process consuming resources while serving no purpose. It cleanly exits the middleman and lets your applications speak directly to the internet. This is not failure; it is intelligent adaptation.
-
-When BIG-IP Edge Client spins up its local PAC server on an ephemeral port, the script does not force you to manually reconfigure CNTLM every time your VPN connects. It detects the change, reconciles the configuration, and maintains seamless connectivity.
-
-When you move from office to home to coffee shop, the script travels with you, making the necessary adjustments without demanding your attention. It is infrastructure that understands its role is to enable your work, not to become a subject of it.
-
----
-
-## License and Attribution
-
-Buster-MyConnection is released under the GPL-3 License. It relies upon the community-maintained [versat/cntlm](https://github.com/versat/cntlm) fork of the original CNTLM project, which continues the legacy of this essential tool after the original SourceForge repository entered maintenance-only mode.
-
-The script was crafted with attention to cross-version PowerShell compatibility, ensuring functionality across the fragmented landscape of Windows PowerShell and PowerShell Core installations. It respects your environment by operating solely within process-scope environment variables, never touching system-wide configuration without explicit direction.
-
----
-
-## Acknowledgments
-
-The decorator pattern implementation was inspired by the recognition that corporate VPN landscapes are too diverse for hardcoded solutions. The health-check mechanism emerged from one too many mornings spent wondering why every `git fetch` had suddenly slowed to a crawl, only to discover the corporate proxy had failed overnight. And the self-installation capability acknowledges that developers should spend their time developing, not performing manual software distribution.
-
----
-
-<p align="center">
-  <em>May your connections remain stable, your proxies responsive, and your VPN transitions seamless!</em>
-</p>
+🖖 _May your connections remain stable, your proxies responsive, and your VPN transitions seamless!_
