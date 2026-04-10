@@ -223,11 +223,11 @@ function Backup-ProxyEnvironmentVariables {
     $proxyPattern = [regex]'(?i)proxy'
     $backup = @{}
 
-    Get-ChildItem Env: | Where-Object {
-        $proxyPattern.IsMatch($_.Name)
-    } | ForEach-Object {
-        $backup[$_.Name] = $_.Value
-    }
+    Get-ChildItem Env: |
+        Where-Object { $proxyPattern.IsMatch($_.Key) } |
+        ForEach-Object {
+            $backup[$_.Key] = $_.Value
+        }
 
     return $backup
 }
@@ -674,6 +674,7 @@ function Test-ProxyWithCurl {
 
         try {
             $stderrFile = [System.IO.Path]::GetTempFileName()
+            # Requires Windows 10 1803+ or curl in PATH
             $httpStatus = curl.exe -sS --max-time $TimeoutSeconds -o NUL -w "%{http_code}" `
                 --proxy $proxyUrl http://httpbin.org/get 2>$stderrFile
 
@@ -715,6 +716,7 @@ function Test-ProxyWithCurl {
 
         try {
             $stderrFile = [System.IO.Path]::GetTempFileName()
+            # Requires Windows 10 1803+ or curl in PATH
             $httpsStatus = curl.exe -sS --max-time $TimeoutSeconds -o NUL -w "%{http_code}" `
                 --proxy $proxyUrl https://httpbin.org/get 2>$stderrFile
 
