@@ -1,6 +1,4 @@
-﻿#!/usr/bin/env pwsh
-
-<#
+﻿<#
 .SYNOPSIS
     Buster-MyConnection launches the CNTLM authentication proxy with intelligent setup
     capabilities and fallback to direct internet access.
@@ -243,10 +241,10 @@ function Remove-ProxyEnvironmentVariables {
     $backup = @{}
 
     $proxyVars = Get-ChildItem Env: | Where-Object {
-        $proxyPattern.IsMatch($_.Name)
+        $proxyPattern.IsMatch($_.Key)
     }
 
-    if (-not $proxyVars) {
+    if (-not $proxyVars -or $proxyVars.Count -eq 0) {
         Out-Info "No proxy-related environment variables found to remove."
         return @{ Count = 0; Backup = @{} }
     }
@@ -254,22 +252,24 @@ function Remove-ProxyEnvironmentVariables {
     Out-Warn "Removing $($proxyVars.Count) proxy-related environment variable(s) from current session..."
 
     foreach ($var in $proxyVars) {
+        $varName = $var.Key
+        $path = "Env:\$varName"
+
         try {
-            $path = "Env:\$($var.Name)"
             if (Test-Path $path) {
-                $backup[$_.Name] = $var.Value
+                $backup[$varName] = $var.Value
                 Remove-Item -Path $path -Force -ErrorAction Stop
-                Out-Info "Unset: $($var.Name)"
+                Out-Info "Unset: $varName"
                 $removedCount++
             }
         }
         catch {
-            Out-Warn "Failed to remove $($var.Name): $($_.Exception.Message)"
+            Out-Warn "Failed to remove ${varName}: $($_.Exception.Message)"
         }
     }
 
     return @{
-        Count = $removedCount
+        Count  = $removedCount
         Backup = $backup
     }
 }
