@@ -89,6 +89,26 @@ param(
 )
 
 Set-StrictMode -Version Latest
+
+trap {
+    Write-Host ""
+    Write-Host "=== UNHANDLED ERROR DIAGNOSTIC ===" -ForegroundColor Red
+    Write-Host "Exception: $($_.Exception.GetType().FullName)"
+    Write-Host "Message  : $($_.Exception.Message)"
+
+    if ($_.InvocationInfo) {
+        Write-Host "Script   : $($_.InvocationInfo.ScriptName)"
+        Write-Host "Line     : $($_.InvocationInfo.ScriptLineNumber)"
+        Write-Host "LineText : $($_.InvocationInfo.Line.Trim())"
+    } else {
+        Write-Host "InvocationInfo not available"
+    }
+
+    Write-Host "================================"
+    break
+}
+
+
 $ErrorActionPreference = 'Stop'
 
 #------------------------------
@@ -278,19 +298,23 @@ function Restore-ProxyEnvironmentVariables {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
-        [hashtable]$Variables
+        $Variables
     )
 
-    if (-not $Variables -or $Variables.Count -eq 0) {
+    $propertyCount =
+        if ($Variables) { $Variables.PSObject.Properties.Count } else { 0 }
+
+    if ($propertyCount -eq 0) {
         Out-Warn "No proxy variables to restore from backup."
         return 0
     }
 
-    Out-Info "Restoring $($Variables.Count) proxy environment variable(s) from previous session..."
+    Out-Info "Restoring $propertyCount proxy environment variable(s) from previous session..."
     $restoredCount = 0
 
-    foreach ($varName in $Variables.Keys) {
-        $value = $Variables[$varName]
+    foreach ($prop in $Variables.PSObject.Properties) {
+        $varName = $prop.Name
+        $value   = $prop.Value
 
         if ($null -eq $value) {
             Out-Warn "Skipping restore of ${varName}: value is null"
@@ -298,7 +322,7 @@ function Restore-ProxyEnvironmentVariables {
         }
 
         try {
-            [Environment]::SetEnvironmentVariable($varName, $value, 'Process')
+            :SetEnvironmentVariable($varName, $value, 'Process')
             Out-Info "Restored: $varName"
             $restoredCount++
         }
@@ -1401,7 +1425,19 @@ if ($vpnResult.IsVpnActive) {
     $proxyModeReason = "$($vpnResult.VpnType) detected: $($vpnResult.Description)"
 
     # If we were in direct access mode before, restore proxy variables
-    if ($wasInDirectAccessMode -and $proxyVarsBackup.Count -gt 0) {
+    $hasProxyVarsToRestore = $false
+    if ($proxyVarsBackup) {
+        # Sometimes .Count isn't available for .Properties. Measure-Object is safer.
+        $propertyCount =
+            ($proxyVarsBackup.PSObject.Properties | Measure-Object).Count
+
+        if ($propertyCount -gt 0) {
+            $hasProxyVarsToRestore = $true
+        }
+    }
+
+
+    if ($wasInDirectAccessMode -and $hasProxyVarsToRestore) {
         Out-Info "Transitioning from DIRECT ACCESS to PROXY mode. Restoring environment variables..."
         $restoredCount = Restore-ProxyEnvironmentVariables -Variables $proxyVarsBackup
         Out-Success "Restored $restoredCount proxy environment variable(s)."
