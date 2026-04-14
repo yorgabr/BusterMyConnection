@@ -192,7 +192,7 @@ function Restore-ProxyEnvironmentVariables {
     foreach ($p in $Variables.PSObject.Properties) {
         if ($null -ne $p.Value) {
             Write-Verbose "Restoring $($p.Name)"
-            [Environment]::SetEnvironmentVariable($p.Name, $p.Value, 'Process')
+            [System.Environment]::SetEnvironmentVariable($p.Name, $p.Value, 'Process')
         }
     }
 }
@@ -200,10 +200,10 @@ function Restore-ProxyEnvironmentVariables {
 function Set-ProxyEnvironmentForCntlm {
     param([int]$Port)
     $proxy = "http://127.0.0.1:$Port"
-    $env:HTTP_PROXY  = $proxy
-    $env:HTTPS_PROXY = $proxy
-    $env:ALL_PROXY   = $proxy
-    $env:NO_PROXY    = 'localhost,127.0.0.1'
+    [System.Environment]::SetEnvironmentVariable('HTTP_PROXY',  $proxy, 'Process')
+    [System.Environment]::SetEnvironmentVariable('HTTPS_PROXY', $proxy, 'Process')
+    [System.Environment]::SetEnvironmentVariable('ALL_PROXY',   $proxy, 'Process')
+    [System.Environment]::SetEnvironmentVariable('NO_PROXY',    'localhost,127.0.0.1', 'Process')
     Out-Info "Proxy environment variables exported for CNTLM."
 }
 
