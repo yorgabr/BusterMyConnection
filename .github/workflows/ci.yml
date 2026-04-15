@@ -1,0 +1,37 @@
+name: PowerShell CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up PowerShell
+        shell: pwsh
+        run: |
+          $PSVersionTable
+
+      - name: Install Invoke-Build
+        shell: pwsh
+        run: |
+          Install-Module InvokeBuild -Force -Scope CurrentUser -SkipPublisherCheck
+
+      - name: Install Pester
+        shell: pwsh
+        run: |
+          Install-Module Pester -Force -Scope CurrentUser -SkipPublisherCheck
+
+      - name: Install PSScriptAnalyzer
+        shell: pwsh
+        run: |
+          Install-Module PSScriptAnalyzer -Force -Scope CurrentUser -SkipPublisherCheck
+
+      - name: Run build
+        shell: pwsh
+        run: |
+          Invoke-Build
