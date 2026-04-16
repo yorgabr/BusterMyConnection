@@ -1,9 +1,5 @@
 ﻿#requires -Version 5.1
 
-param(
-    [string]$Task = 'Default'
-)
-
 Import-Module InvokeBuild -ErrorAction Stop
 
 task Default Test
