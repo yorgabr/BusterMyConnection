@@ -149,7 +149,7 @@
     File Name      : Buster-MyConnection.ps1
     Author         : Yorga Babuscan (yorgabr@gmail.com)
     Prerequisite   : PowerShell 5.1 or later
-    Version        : 2.4.1
+    Version        : 2.5.0
     
     All user-facing messages and logs are emitted in English to maintain consistency
     across international environments and facilitate troubleshooting in heterogeneous
@@ -248,7 +248,7 @@ if (-not $PSBoundParameters.ContainsKey('Quiet')) {
 #---------------------------------
 # Script Metadata
 #---------------------------------
-$SCRIPT_VERSION = '2.4.1'
+$SCRIPT_VERSION = '2.5.0'
 $SCRIPT_NAME    = 'Buster-MyConnection'
 
 #---------------------------------
@@ -490,21 +490,26 @@ function Get-CntlmConfiguration {
 
     Get-Content $IniPath | ForEach-Object {
         $line = $_.Trim()
+        
+        # Match: Proxy hostname:port
         if ($line -match '^Proxy\s+(.+):(\d+)') {
             $config.Proxy = $matches[1]
             $config.ProxyPort = [int]$matches[2]
         }
-        elseif ($line -match '^Listen\s+(\d+)') {
+        # Match: Listen port OR Listen ip:port
+        elseif ($line -match '^Listen\s+(?:[\d\.]+:)?(\d+)') {
             $config.Listen = [int]$matches[1]
         }
+        # Match: Domain value
         elseif ($line -match '^Domain\s+(.+)') {
             $config.Domain = $matches[1]
         }
+        # Match: Username value
         elseif ($line -match '^Username\s+(.+)') {
             $config.Username = $matches[1]
         }
+        # Match: NoProxy exceptions
         elseif ($line -match '^NoProxy\s+(.+)') {
-            # Convert CNTLM NoProxy format to environment variable format
             $noProxyValue = $matches[1]
             # Remove leading/trailing whitespace and normalize separators
             $config.NoProxy = $noProxyValue -replace '\s*,\s*', ',' -replace '\s+', ','
@@ -837,7 +842,7 @@ function Invoke-ForceCntlm {
     # Parse configuration to get listen port and NoProxy
     try {
         $config = Get-CntlmConfiguration -IniPath $IniPath
-        $listenPort = [int]$config.Listen
+        $listenPort = $config.Listen
         $noProxy = $config.NoProxy
         
         Out-Info "CNTLM Configuration:"
@@ -1036,8 +1041,12 @@ if ($resolvedExe -and (Test-Path $IniPath)) {
     }
 }
 
-# Strategy 2: Try direct access
-Out-Info "Strategy 2: Attempting direct access mode..."
+# Strategy 2: Try corporate proxy (requires authentication)
+Out-Info "Strategy 2: Corporate proxy mode requires manual activation with -Force PROXY"
+Out-Info "Skipping in auto-detection mode to avoid credential prompts."
+
+# Strategy 3: Try direct access
+Out-Info "Strategy 3: Attempting direct access mode..."
 $backup = Backup-ProxyEnvironmentVariables
 Remove-ProxyEnvironmentVariables
 
@@ -1047,10 +1056,6 @@ if (Test-InternetConnectivity -TimeoutSeconds $DirectAccessTestTimeoutSeconds) {
     Out-Info "Final strategy: DIRECT ACCESS MODE."
     exit 0
 }
-
-# Strategy 3: Try corporate proxy
-Out-Info "Strategy 3: Corporate proxy mode requires manual activation with -Force PROXY"
-Out-Info "Skipping in auto-detection mode to avoid credential prompts."
 
 Out-Error "No viable connectivity strategy available. Try: -Force DIRECT, -Force PROXY, or -Force CNTLM"
 exit 1
