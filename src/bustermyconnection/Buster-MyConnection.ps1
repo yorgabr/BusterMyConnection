@@ -149,7 +149,7 @@
     File Name      : Buster-MyConnection.ps1
     Author         : Yorga Babuscan (yorgabr@gmail.com)
     Prerequisite   : PowerShell 5.1 or later
-    Version        : 2.4.0
+    Version        : 2.4.1
     
     All user-facing messages and logs are emitted in English to maintain consistency
     across international environments and facilitate troubleshooting in heterogeneous
@@ -248,7 +248,7 @@ if (-not $PSBoundParameters.ContainsKey('Quiet')) {
 #---------------------------------
 # Script Metadata
 #---------------------------------
-$SCRIPT_VERSION = '2.4.0'
+$SCRIPT_VERSION = '2.4.1'
 $SCRIPT_NAME    = 'Buster-MyConnection'
 
 #---------------------------------
@@ -433,12 +433,14 @@ function Restore-ProxyEnvironmentVariables {
 
 function Set-ProxyEnvironmentForCntlm {
     param([int]$Port = 3128, [string]$NoProxy = 'localhost,127.0.0.1')
+    
     $proxy = "http://127.0.0.1:$Port"
     [System.Environment]::SetEnvironmentVariable('HTTP_PROXY',  $proxy, 'Process')
     [System.Environment]::SetEnvironmentVariable('HTTPS_PROXY', $proxy, 'Process')
     [System.Environment]::SetEnvironmentVariable('ALL_PROXY',   $proxy, 'Process')
     [System.Environment]::SetEnvironmentVariable('NO_PROXY',    $NoProxy, 'Process')
-    Out-Info "Proxy environment variables exported for CNTLM on port $Port."
+    
+    Out-Info "Proxy environment variables exported for CNTLM on port $Port"
     Out-Info "NO_PROXY set to: $NoProxy"
 }
 
@@ -462,6 +464,7 @@ function Set-ProxyEnvironmentForCorporate {
     [System.Environment]::SetEnvironmentVariable('HTTPS_PROXY', $proxy, 'Process')
     [System.Environment]::SetEnvironmentVariable('ALL_PROXY',   $proxy, 'Process')
     [System.Environment]::SetEnvironmentVariable('NO_PROXY',    $NoProxy, 'Process')
+    
     Out-Info "Proxy environment variables exported for corporate proxy: http://${ProxyAddress}:${ProxyPort}"
     Out-Info "NO_PROXY set to: $NoProxy"
 }
@@ -548,6 +551,8 @@ function Test-ProxyConnectivity {
         'https://httpbin.org/get'
     )
     
+    $failureReasons = @()
+    
     foreach ($url in $testUrls) {
         try {
             $params = @{
@@ -564,7 +569,17 @@ function Test-ProxyConnectivity {
             Invoke-WebRequest @params | Out-Null
             Write-Verbose "Proxy connectivity test succeeded: $url via $ProxyUrl"
         } catch {
-            Write-Verbose "Proxy connectivity test failed: $url via $ProxyUrl - $($_.Exception.Message)"
+            $errorMsg = $_.Exception.Message
+            Write-Verbose "Proxy connectivity test failed: $url via $ProxyUrl - $errorMsg"
+            $failureReasons += "  - $url : $errorMsg"
+            
+            # If first test fails, return immediately with detailed error
+            if ($failureReasons.Count -eq 1) {
+                Write-Host "[ERROR] Proxy connectivity test failed:" -ForegroundColor Red
+                Write-Host "  URL: $url" -ForegroundColor Yellow
+                Write-Host "  Proxy: $ProxyUrl" -ForegroundColor Yellow
+                Write-Host "  Error: $errorMsg" -ForegroundColor Yellow
+            }
             return $false
         }
     }
@@ -822,8 +837,13 @@ function Invoke-ForceCntlm {
     # Parse configuration to get listen port and NoProxy
     try {
         $config = Get-CntlmConfiguration -IniPath $IniPath
-        $listenPort = $config.Listen
+        $listenPort = [int]$config.Listen
         $noProxy = $config.NoProxy
+        
+        Out-Info "CNTLM Configuration:"
+        Out-Info "  Listen Port: $listenPort"
+        Out-Info "  NoProxy: $noProxy"
+        Out-Info "  Upstream Proxy: $($config.Proxy):$($config.ProxyPort)"
     } catch {
         Out-Error "Failed to parse CNTLM configuration: $($_.Exception.Message)"
         return $false
@@ -837,16 +857,34 @@ function Invoke-ForceCntlm {
         return $false
     }
     
-    # Verify CNTLM is running and accessible
+    # Verify CNTLM is running
     if (-not (Test-CntlmRunning)) {
         Out-Error "CNTLM process is not running after startup attempt."
+        Out-Info "Troubleshooting tips:"
+        Out-Info "  1. Check if the CNTLM configuration file is valid"
+        Out-Info "  2. Verify upstream proxy is accessible: $($config.Proxy):$($config.ProxyPort)"
+        Out-Info "  3. Check CNTLM logs (if available)"
+        Out-Info "  4. Ensure no other process is using port $listenPort"
         return $false
     }
+    
+    Out-Success "CNTLM process is running."
     
     # Configure environment and test connectivity
     Remove-ProxyEnvironmentVariables
     Set-ProxyEnvironmentForCntlm -Port $listenPort -NoProxy $noProxy
     
+    # Wait a bit for CNTLM to fully initialize
+    Start-Sleep -Seconds 1
+    
+    # Test if the port is actually listening
+    if (-not (Test-TcpPort -Address '127.0.0.1' -Port $listenPort -TimeoutSeconds 3)) {
+        Out-Error "CNTLM is running but not listening on port $listenPort"
+        Out-Info "Please check CNTLM configuration and logs."
+        return $false
+    }
+    
+    Out-Info "Testing CNTLM proxy connectivity..."
     $proxyUrl = "http://127.0.0.1:$listenPort"
     if (Test-ProxyConnectivity -ProxyUrl $proxyUrl -TimeoutSeconds $DirectAccessTestTimeoutSeconds) {
         Out-Success "CNTLM PROXY mode activated and verified."
@@ -854,6 +892,11 @@ function Invoke-ForceCntlm {
         return $true
     } else {
         Out-Error "CNTLM PROXY mode failed connectivity test."
+        Out-Info "Possible causes:"
+        Out-Info "  1. Upstream proxy $($config.Proxy):$($config.ProxyPort) is not accessible"
+        Out-Info "  2. Invalid credentials in cntlm.ini"
+        Out-Info "  3. CNTLM configuration error"
+        Out-Info "  4. Network/firewall blocking external connectivity"
         return $false
     }
 }
