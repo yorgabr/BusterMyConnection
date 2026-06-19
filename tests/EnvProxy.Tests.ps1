@@ -49,3 +49,21 @@ Describe 'Proxy environment variable lifecycle' {
         $env:HTTP_PROXY | Should -Be 'fromjson'
     }
 }
+
+Describe 'Set-ProxyEnvironmentForCntlm' {
+
+    AfterEach {
+        foreach ($v in 'HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','NO_PROXY') {
+            [System.Environment]::SetEnvironmentVariable($v, $null, 'Process')
+        }
+    }
+
+    It 'points all proxy variables at the local CNTLM listener' {
+        Set-ProxyEnvironmentForCntlm -Port 3128 -NoProxy 'localhost,127.0.0.1'
+
+        $env:HTTP_PROXY  | Should -Be 'http://127.0.0.1:3128'
+        $env:HTTPS_PROXY | Should -Be 'http://127.0.0.1:3128'
+        $env:ALL_PROXY   | Should -Be 'http://127.0.0.1:3128'
+        $env:NO_PROXY    | Should -Be 'localhost,127.0.0.1'
+    }
+}

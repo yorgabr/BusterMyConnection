@@ -209,7 +209,10 @@ function Out-Warn {
 
 function Out-Error {
     param([string]$Message)
-    Write-Error $Message
+    # Business-level failures are control flow (callers return $false / exit 1),
+    # not terminating exceptions. Emit to the error stream without honoring the
+    # script-wide 'Stop' preference, so functions can complete their return path.
+    Write-Error $Message -ErrorAction Continue
 }
 
 #---------------------------------
