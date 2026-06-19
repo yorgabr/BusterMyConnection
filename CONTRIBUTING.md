@@ -91,6 +91,18 @@ This separation is intentional. `-JustCheck` is the script’s conscience: obser
 
 ***
 
+## Expected Warnings Are Assertions, Not Noise
+
+When a function emits a warning along a particular path, that warning is part of its observable contract. A test that exercises such a path must capture the warning and assert on it, rather than letting it surface in the build log.
+
+A warning that leaks into the test output is a wasted assertion: the test clearly drove the code down a branch that was supposed to warn, yet it verified nothing about that outcome. Worse, leaked warnings accumulate as background noise that trains reviewers to ignore the very signal warnings exist to provide. The discipline is therefore symmetrical to the one we apply to errors — a failure path that returns `$false` is asserted with `Should -BeFalse`, and a path that warns is asserted against the warning it produces.
+
+In practice, redirect the warning stream into a variable and confirm both the function's result and the message it raised. The merged stream carries the function's return value alongside `WarningRecord` objects, so filter for the record type before asserting on its content. The goal is twofold: the assertion proves the warning fired with the right message, and the build log stays clean because the warning was consumed instead of escaping.
+
+This applies equally to warnings raised directly and to those emitted indirectly through the script's own output helpers, such as `Out-Warn`. If you add a code path that warns, add a test that captures it. If you encounter a leaked warning in the build output, treat it as a missing assertion and close the gap.
+
+***
+
 ## Coding Standards
 
 *   **PowerShell compatibility**: Windows PowerShell 5.1 is the baseline

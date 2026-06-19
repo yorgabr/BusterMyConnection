@@ -26,9 +26,19 @@ Describe 'Test-ProxyConnectivity' {
         Test-ProxyConnectivity -ProxyUrl 'http://127.0.0.1:3128' -TimeoutSeconds 1 | Should -BeTrue
     }
 
-    It 'returns false on the first request error' {
+    It 'returns false and warns on the first request error' {
         Mock Invoke-WebRequest { throw 'proxy refused' }
-        Test-ProxyConnectivity -ProxyUrl 'http://127.0.0.1:3128' -TimeoutSeconds 1 | Should -BeFalse
+
+        $result = $null
+        $warnings = & {
+            $script:r = Test-ProxyConnectivity -ProxyUrl 'http://127.0.0.1:3128' -TimeoutSeconds 1
+        } 3>&1 | Where-Object { $_ -is [System.Management.Automation.WarningRecord] }
+        $result = $script:r
+
+        $result   | Should -BeFalse
+        $warnings | Should -Not -BeNullOrEmpty
+        ($warnings -join "`n") | Should -Match 'proxy refused'
+        ($warnings -join "`n") | Should -Match 'http://127\.0\.0\.1:3128'
     }
 
     It 'passes ProxyCredential through when supplied' {
@@ -40,3 +50,4 @@ Describe 'Test-ProxyConnectivity' {
         Should -Invoke Invoke-WebRequest -ParameterFilter { $ProxyCredential -ne $null }
     }
 }
+

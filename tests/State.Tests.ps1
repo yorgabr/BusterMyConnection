@@ -26,9 +26,18 @@ Describe 'Execution state persistence' {
         (Get-PreviousExecutionState).Version | Should -Be '2.6.0'
     }
 
-    It 'returns null when the state file is invalid JSON' {
+    It 'returns null and warns when the state file is invalid JSON' {
         Set-Content $StateFilePath '{invalid json'
-        Get-PreviousExecutionState | Should -BeNullOrEmpty
+
+        $result = $null
+        $warnings = & {
+            $script:r = Get-PreviousExecutionState
+        } 3>&1 | Where-Object { $_ -is [System.Management.Automation.WarningRecord] }
+        $result = $script:r
+
+        $result   | Should -BeNullOrEmpty
+        $warnings | Should -Not -BeNullOrEmpty
+        ($warnings -join "`n") | Should -Match 'Failed to read previous execution state'
     }
 
     It 'returns null when no state file exists' {
