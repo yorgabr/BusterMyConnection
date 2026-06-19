@@ -1,29 +1,38 @@
-# tests/State.Tests.ps1
+#requires -Version 5.1
+#requires -Modules Pester
 
-$scriptPath = Join-Path $PSScriptRoot '..\src\bustermyconnection\Buster-MyConnection.ps1'
-. $scriptPath
+BeforeAll {
+    $script:ScriptPath = (Resolve-Path (Join-Path $PSScriptRoot '..\src\bustermyconnection\Buster-MyConnection.ps1')).Path
+    . $script:ScriptPath -DotSourceOnly
+}
 
 Describe 'Execution state persistence' {
 
-    BeforeAll {
-        $script:StateFilePath = Join-Path $TestDrive 'state.json'
+    BeforeEach {
+        # Redirect the module-level state path into the test sandbox.
+        Set-Variable -Name StateFilePath -Scope Script -Value (Join-Path $TestDrive 'state.json')
     }
 
     It 'persists and restores DirectAccess state' {
-        Set-ExecutionState -Mode DirectAccess -ProxyVariables @{
-            HTTP_PROXY = 'x'
-        }
+        Set-ExecutionState -Mode DirectAccess -ProxyVariables @{ HTTP_PROXY = 'x' }
 
         $s = Get-PreviousExecutionState
-
-        $s.Mode | Should -Be 'DirectAccess'
+        $s.Mode                     | Should -Be 'DirectAccess'
         $s.ProxyVariables.HTTP_PROXY | Should -Be 'x'
     }
 
-    It 'returns null if state file is invalid' {
-        Set-Content $StateFilePath '{invalid json'
+    It 'records the script version into the state' {
+        Set-ExecutionState -Mode Proxied
+        (Get-PreviousExecutionState).Version | Should -Be '2.6.0'
+    }
 
-        $s = Get-PreviousExecutionState
-        $s | Should -BeNullOrEmpty
+    It 'returns null when the state file is invalid JSON' {
+        Set-Content $StateFilePath '{invalid json'
+        Get-PreviousExecutionState | Should -BeNullOrEmpty
+    }
+
+    It 'returns null when no state file exists' {
+        Remove-Item $StateFilePath -ErrorAction SilentlyContinue
+        Get-PreviousExecutionState | Should -BeNullOrEmpty
     }
 }

@@ -1,21 +1,42 @@
-# tests/Connectivity.Tests.ps1
+#requires -Version 5.1
+#requires -Modules Pester
 
-$scriptPath = Join-Path $PSScriptRoot '..\src\bustermyconnection\Buster-MyConnection.ps1'
-. $scriptPath
+BeforeAll {
+    $script:ScriptPath = (Resolve-Path (Join-Path $PSScriptRoot '..\src\bustermyconnection\Buster-MyConnection.ps1')).Path
+    . $script:ScriptPath -DotSourceOnly
+}
 
-Describe 'Connectivity checks' {
+Describe 'Test-InternetConnectivity' {
 
-    Mock Invoke-WebRequest {
-        [pscustomobject]@{ StatusCode = 200 }
-    }
-
-    It 'validates direct internet connectivity' {
+    It 'returns true when a request succeeds' {
+        Mock Invoke-WebRequest { [pscustomobject]@{ StatusCode = 200 } }
         Test-InternetConnectivity -TimeoutSeconds 1 | Should -BeTrue
     }
 
-    Mock Invoke-WebRequest { throw }
+    It 'returns false when every request fails' {
+        Mock Invoke-WebRequest { throw 'no network' }
+        Test-InternetConnectivity -TimeoutSeconds 1 | Should -BeFalse
+    }
+}
 
-    It 'fails proxy connectivity on request error' {
-        Test-ProxyConnectivity -ProxyPort 3128 -TimeoutSeconds 1 | Should -BeFalse
+Describe 'Test-ProxyConnectivity' {
+
+    It 'returns true when all proxied requests succeed' {
+        Mock Invoke-WebRequest { [pscustomobject]@{ StatusCode = 200 } }
+        Test-ProxyConnectivity -ProxyUrl 'http://127.0.0.1:3128' -TimeoutSeconds 1 | Should -BeTrue
+    }
+
+    It 'returns false on the first request error' {
+        Mock Invoke-WebRequest { throw 'proxy refused' }
+        Test-ProxyConnectivity -ProxyUrl 'http://127.0.0.1:3128' -TimeoutSeconds 1 | Should -BeFalse
+    }
+
+    It 'passes ProxyCredential through when supplied' {
+        Mock Invoke-WebRequest { [pscustomobject]@{ StatusCode = 200 } }
+        $sec  = ConvertTo-SecureString 'p' -AsPlainText -Force
+        $cred = New-Object System.Management.Automation.PSCredential('u', $sec)
+
+        Test-ProxyConnectivity -ProxyUrl 'http://127.0.0.1:3128' -TimeoutSeconds 1 -Credential $cred | Should -BeTrue
+        Should -Invoke Invoke-WebRequest -ParameterFilter { $ProxyCredential -ne $null }
     }
 }

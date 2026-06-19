@@ -48,6 +48,12 @@ This design is intentionally extensible: adding support for a new VPN does not r
 
 ***
 
+## Credentials and Proxy URLs
+
+NTLM authentication is domain-aware: CNTLM and the corporate proxy expect an identity of the form `DOMAIN\user`. An HTTP proxy URL, however, is not. When Buster-MyConnection exports `HTTP_PROXY` for corporate mode, it deliberately strips the domain component and URL-encodes the remaining `user:password`, producing `http://user:password@proxy:port`. This matters because a backslash in the userinfo segment leads Git and libcurl to interpret the URL as containing a path — a construct only SOCKS proxies accept — which previously caused `fatal: ... only SOCKS proxies support paths`. The domain still participates in authentication through the credential object passed to the underlying request; it simply never appears in the URL.
+
+***
+
 ## State Persistence and Recovery
 
 One of the script’s most consequential behaviors occurs during failure.
@@ -81,12 +87,14 @@ This makes `-JustCheck` suitable for automation pipelines, pre‑deployment heal
 
 ## Exit Codes
 
+The script communicates its outcome through process exit codes, suitable for use in automation and CI pipelines.
+
 | Code | Meaning                                                               |
 | ---: | --------------------------------------------------------------------- |
-|    0 | Success (CNTLM started or Direct Access mode intentionally activated) |
-|    1 | General failure or failed validation                                  |
-|    2 | Configuration wizard failure                                          |
-|    3 | CNTLM installation failure                                            |
+|    0 | Success — CNTLM started, or Direct Access mode intentionally activated |
+|    1 | Failure — no viable strategy, failed validation, or a forced mode could not be satisfied |
+
+Earlier releases reserved codes 2 and 3 for wizard and installation failures; these now surface as code 1 with a descriptive error message, keeping the contract simple for callers.
 
 ***
 

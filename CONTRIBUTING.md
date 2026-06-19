@@ -8,6 +8,24 @@ This document exists to ensure that such contributions integrate cleanly with bo
 
 ***
 
+## Getting Started in Fifteen Minutes
+
+If this is your first contribution, the path from cloning the repository to opening a merge request is deliberately short.
+
+Begin by cloning the project and ensuring you are on Windows PowerShell 5.1, which is the supported baseline. From the repository root, install the three modules the build depends upon — `InvokeBuild`, `Pester` (5.0 or newer), and `PSScriptAnalyzer` — into your user scope. With those present, a single invocation of `Invoke-Build` runs the full quality gate: it lints the source, executes every test, and measures code coverage against the project's 60% floor.
+
+Day-to-day, you will rarely run the whole gate. While iterating, run only the tests with `Invoke-Build Test`, or target a single file with `Invoke-Pester ./tests/Config.Tests.ps1`. Tests load the script through its `-DotSourceOnly` switch, which defines all functions and returns before the main flow executes. This is what makes the functions individually testable without downloading CNTLM, spawning processes, or mutating your real environment. When you write a new test, follow the same pattern: dot-source with `-DotSourceOnly`, then `Mock` any function that touches the network, the filesystem outside `$TestDrive`, or running processes.
+
+A healthy contribution loop looks like this: pick an issue, write a failing test that expresses the desired behavior, implement the change in the script, run `Invoke-Build Test` until green, then run the full `Invoke-Build` once before pushing. Bump the version in both the comment-based help (`.NOTES`) and the `$SCRIPT_VERSION` constant following SemVer — patch for fixes, minor for backward-compatible features, major for breaking changes. Finish with a Conventional Commit message describing the change, push your branch, and open a merge request that references the issue.
+
+***
+
+## A Note on Testability and the `-DotSourceOnly` Guard
+
+The script is simultaneously an executable and a library of functions. To reconcile these roles, execution past the function definitions is gated behind a `-DotSourceOnly` switch. When present, the script returns immediately after defining its functions, exposing them to the caller's session without side effects. Production invocations never pass this switch and therefore proceed into the main flow as usual. Any new function you add becomes testable automatically, provided it is declared above this guard.
+
+***
+
 ## VPN Detection: The Primary Extension Point
 
 The most common and most valuable contributions to this project involve expanding VPN awareness.

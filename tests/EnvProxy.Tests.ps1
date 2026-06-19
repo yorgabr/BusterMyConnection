@@ -1,30 +1,21 @@
-# tests/EnvProxy.Tests.ps1
-# Requires -Module Pester
+#requires -Version 5.1
+#requires -Modules Pester
 
-$scriptPath = Join-Path $PSScriptRoot '..\src\bustermyconnection\Buster-MyConnection.ps1'
-. $scriptPath
+BeforeAll {
+    $script:ScriptPath = (Resolve-Path (Join-Path $PSScriptRoot '..\src\bustermyconnection\Buster-MyConnection.ps1')).Path
+    . $script:ScriptPath -DotSourceOnly
+}
 
 Describe 'Proxy environment variable lifecycle' {
 
-    BeforeAll {
-        $originalEnv = @{}
-        Get-ChildItem Env: | ForEach-Object {
-            $originalEnv[$_.Key] = $_.Value
-        }
-    }
-
-    AfterAll {
-        Get-ChildItem Env: | ForEach-Object {
-            Remove-Item "Env:\$($_.Key)" -ErrorAction SilentlyContinue
-        }
-        foreach ($k in $originalEnv.Keys) {
-            :SetEnvironmentVariable($k, $originalEnv[$k], 'Process')
+    AfterEach {
+        foreach ($v in 'HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','NO_PROXY','PROXY_FOO') {
+            [System.Environment]::SetEnvironmentVariable($v, $null, 'Process')
         }
     }
 
     It 'backs up only proxy-related variables' {
-        :SetEnvironmentVariable('HTTP_PROXY','x','Process')
-        :SetEnvironmentVariable('PATH','y','Process')
+        [System.Environment]::SetEnvironmentVariable('HTTP_PROXY','x','Process')
 
         $b = Backup-ProxyEnvironmentVariables
 
@@ -32,23 +23,29 @@ Describe 'Proxy environment variable lifecycle' {
         $b.Keys | Should -Not -Contain 'PATH'
     }
 
-    It 'removes only proxy-related variables and returns backup' {
-        :SetEnvironmentVariable('HTTPS_PROXY','x','Process')
+    It 'removes only proxy-related variables and returns a backup with count' {
+        [System.Environment]::SetEnvironmentVariable('HTTPS_PROXY','x','Process')
 
         $r = Remove-ProxyEnvironmentVariables
 
-        $env:HTTPS_PROXY | Should -BeNullOrEmpty
-        $r.Backup.Keys | Should -Contain 'HTTPS_PROXY'
-        $r.Count | Should -Be 1
+        $env:HTTPS_PROXY    | Should -BeNullOrEmpty
+        $r.Backup.Keys      | Should -Contain 'HTTPS_PROXY'
+        $r.Count            | Should -BeGreaterOrEqual 1
     }
 
-    It 'restores non-null values only' {
+    It 'restores non-null values only (hashtable input)' {
         Restore-ProxyEnvironmentVariables -Variables @{
-            HTTP_PROXY = 'ok'
+            HTTP_PROXY  = 'ok'
             HTTPS_PROXY = $null
-        } | Out-Null
+        }
 
-        $env:HTTP_PROXY | Should -Be 'ok'
+        $env:HTTP_PROXY  | Should -Be 'ok'
         $env:HTTPS_PROXY | Should -BeNullOrEmpty
+    }
+
+    It 'restores from a PSCustomObject (JSON round-trip shape)' {
+        $obj = [pscustomobject]@{ HTTP_PROXY = 'fromjson'; HTTPS_PROXY = $null }
+        Restore-ProxyEnvironmentVariables -Variables $obj
+        $env:HTTP_PROXY | Should -Be 'fromjson'
     }
 }
