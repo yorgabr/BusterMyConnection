@@ -1,4 +1,5 @@
-﻿#requires -Version 5.1
+﻿# tests/Wizard.Tests.ps1
+#requires -Version 5.1
 #requires -Modules Pester
 
 BeforeAll {
@@ -56,7 +57,10 @@ Describe 'New-CntlmConfiguration' {
             if ($AsSecureString) { return (ConvertTo-SecureString 'S3cr3t!' -AsPlainText -Force) }
             $val = $script:answers3[$script:idx3]; $script:idx3++; return $val
         }
-        Mock Test-Path { $true } -ParameterFilter { $Path -eq 'C:\fake\cntlm.exe' }
+        # Pester 6 no longer falls through to the real cmdlet when a filtered mock
+        # doesn't match; New-CntlmConfiguration also calls Test-Path on the output
+        # directory, so an unconditional default mock is required here.
+        Mock Test-Path { $true }
         Mock Get-CntlmNtlmHash {
             @('PassNTLMv2      AABBCCDDEEFF0011')
         }
@@ -79,7 +83,7 @@ Describe 'New-CntlmConfiguration' {
             if ($AsSecureString) { return (ConvertTo-SecureString 'S3cr3t!' -AsPlainText -Force) }
             $val = $script:answers4[$script:idx4]; $script:idx4++; return $val
         }
-        Mock Test-Path { $true } -ParameterFilter { $Path -eq 'C:\fake\cntlm.exe' }
+        Mock Test-Path { $true }
         Mock Get-CntlmNtlmHash { throw 'cntlm -H exited with code 1' }
 
         $out = Join-Path $TestDrive 'cntlm4.ini'

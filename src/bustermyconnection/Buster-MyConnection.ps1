@@ -1,4 +1,5 @@
-﻿<#
+﻿# src/bustermyconnection/Buster-MyConnection.ps1
+<#
 .SYNOPSIS
     Buster-MyConnection launches the CNTLM authentication proxy with intelligent setup
     capabilities and fallback to direct internet access.
@@ -98,7 +99,7 @@
 .NOTES
     File Name : Buster-MyConnection.ps1
     Author    : Yorga Babuscan (yorgabr@gmail.com)
-    Version   : 2.8.0
+    Version   : 2.8.1
 
 .LINK
     https://github.com/yorgabr/BusterMyConnection
@@ -187,7 +188,7 @@ $script:QuietMode = [bool]$Quiet
 #---------------------------------
 # Script Metadata
 #---------------------------------
-$SCRIPT_VERSION = '2.8.0'
+$SCRIPT_VERSION = '2.8.1'
 $SCRIPT_NAME    = 'Buster-MyConnection'
 
 #---------------------------------
@@ -647,7 +648,10 @@ function Install-CntlmViaScoop {
 
     $exePath = (& scoop which cntlm 2>$null)
     if (-not $exePath) {
-        $exePath = (Get-Command cntlm.exe -ErrorAction SilentlyContinue).Source
+        $fallbackCmd = Get-Command cntlm.exe -ErrorAction SilentlyContinue
+        if ($fallbackCmd) {
+            $exePath = $fallbackCmd.Source
+        }
     }
 
     if (-not $exePath -or -not (Test-Path $exePath)) {

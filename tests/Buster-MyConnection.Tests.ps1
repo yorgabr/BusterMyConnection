@@ -1,10 +1,9 @@
-﻿#requires -Version 5.1
+﻿# tests/Buster-MyConnection.Tests.ps1
+#requires -Version 5.1
 #requires -Modules Pester
 
 BeforeAll {
     $script:ScriptPath = (Resolve-Path (Join-Path $PSScriptRoot '..\src\bustermyconnection\Buster-MyConnection.ps1')).Path
-    # Load function definitions only; never trigger the main flow.
-    . $script:ScriptPath -DotSourceOnly
 }
 
 Describe 'Script integrity' {
@@ -14,61 +13,64 @@ Describe 'Script integrity' {
     }
 
     It 'defines required metadata variables' {
-        $SCRIPT_VERSION | Should -Match '^\d+\.\d+\.\d+$'
+        . $script:ScriptPath -DotSourceOnly
+        $SCRIPT_VERSION | Should -Not -BeNullOrEmpty
         $SCRIPT_NAME    | Should -Be 'Buster-MyConnection'
+        $SCRIPT_VERSION | Should -Match '^\d+\.\d+\.\d+$'
     }
 
-    It 'reports version 2.8.0' {
-        $SCRIPT_VERSION | Should -Be '2.8.0'
+    It 'reports version 2.8.1' {
+        . $script:ScriptPath -DotSourceOnly
+        $SCRIPT_VERSION | Should -Be '2.8.1'
     }
 }
 
 Describe 'ConvertTo-ProxyUserInfo (regression: domain must not leak into URL)' {
 
+    BeforeAll {
+        . $script:ScriptPath -DotSourceOnly
+    }
+
     It 'strips DOMAIN\user form and keeps only the bare user' {
-        $info = ConvertTo-ProxyUserInfo -Username 'DOMINIO\userid' -Password 'pw'
-        $info | Should -Be 'userid:pw@'
+        ConvertTo-ProxyUserInfo -Username 'CORP\jdoe' -Password 'p@ss' | Should -Be 'jdoe:p%40ss@'
     }
 
     It 'strips user@DOMAIN (UPN) form' {
-        $info = ConvertTo-ProxyUserInfo -Username 'userid@DOMINIO' -Password 'pw'
-        $info | Should -Be 'userid:pw@'
+        ConvertTo-ProxyUserInfo -Username 'jdoe@corp.local' -Password 'pw' | Should -Be 'jdoe:pw@'
     }
 
     It 'url-encodes reserved characters in password' {
-        $info = ConvertTo-ProxyUserInfo -Username 'userid' -Password 'p@ss:w/rd'
-        $info | Should -Be 'userid:p%40ss%3Aw%2Frd@'
+        ConvertTo-ProxyUserInfo -Username 'jdoe' -Password 'p@ss:w/rd' | Should -Be 'jdoe:p%40ss%3Aw%2Frd@'
     }
 
     It 'url-encodes reserved characters in username' {
-        $info = ConvertTo-ProxyUserInfo -Username 'DOMINIO\jo@o' -Password 'x'
-        $info | Should -Be 'jo%40o:x@'
+        ConvertTo-ProxyUserInfo -Username 'jo hn' -Password 'pw' | Should -Be 'jo%20hn:pw@'
     }
 
     It 'returns empty string when username is empty' {
-        ConvertTo-ProxyUserInfo -Username '' -Password 'x' | Should -Be ''
+        ConvertTo-ProxyUserInfo -Username '' -Password 'pw' | Should -Be ''
     }
 
     It 'omits the colon when password is empty' {
-        ConvertTo-ProxyUserInfo -Username 'userid' -Password '' | Should -Be 'userid@'
+        ConvertTo-ProxyUserInfo -Username 'jdoe' -Password '' | Should -Be 'jdoe@'
     }
 }
 
 Describe 'Set-ProxyEnvironmentForCorporate (regression: no backslash in HTTP_PROXY)' {
 
+    BeforeAll {
+        . $script:ScriptPath -DotSourceOnly
+    }
+
     AfterEach {
-        foreach ($v in 'HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','NO_PROXY') {
-            [System.Environment]::SetEnvironmentVariable($v, $null, 'Process')
-        }
+        Remove-Item Env:HTTP_PROXY, Env:HTTPS_PROXY, Env:ALL_PROXY, Env:NO_PROXY -ErrorAction SilentlyContinue
     }
 
     It 'builds a proxy URL without DOMAIN\ prefix' {
-        $sec  = ConvertTo-SecureString 'hiddenpwd' -AsPlainText -Force
-        $cred = New-Object System.Management.Automation.PSCredential('DOMINIO\userid', $sec)
-
+        $cred = [PSCredential]::new('CORP\jdoe', (ConvertTo-SecureString 'p@ss' -AsPlainText -Force))
         Set-ProxyEnvironmentForCorporate -ProxyAddress 'proxy.company.net' -ProxyPort 1234 -Credential $cred -NoProxy 'localhost'
 
-        $env:HTTP_PROXY | Should -Be 'http://userid:hiddenpwd@proxy.company.net:1234'
+        $env:HTTP_PROXY | Should -Be 'http://jdoe:p%40ss@proxy.company.net:1234'
         $env:HTTP_PROXY | Should -Not -Match '\\'
     }
 

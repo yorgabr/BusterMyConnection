@@ -24,12 +24,12 @@ jobs:
       - name: Install Pester
         shell: pwsh
         run: |
-          Install-Module Pester -Force -Scope CurrentUser -SkipPublisherCheck
+          Install-Module Pester -MinimumVersion 6.0.0 -Force -Scope CurrentUser -SkipPublisherCheck
 
       - name: Install PSScriptAnalyzer
         shell: pwsh
         run: |
-          Install-Module PSScriptAnalyzer -Force -Scope CurrentUser -SkipPublisherCheck
+          Install-Module PSScriptAnalyzer -MinimumVersion 1.24.0 -Force -Scope CurrentUser -SkipPublisherCheck
 
       - name: Run build
         shell: pwsh
