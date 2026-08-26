@@ -48,4 +48,46 @@ Describe 'New-CntlmConfiguration' {
         (Get-Content $out -Raw) | Should -Match 'Listen\s+3128'
         ($warnings -join "`n")  | Should -Match 'cntlm -H -u john -d CORP'
     }
+
+    It 'stores the NTLM hash instead of the plaintext password when a working cntlm.exe is supplied' {
+        $script:answers3 = @('DOMINIO','userid','proxy.company.net','1234','3128','localhost')
+        $script:idx3 = 0
+        Mock Read-Host {
+            if ($AsSecureString) { return (ConvertTo-SecureString 'S3cr3t!' -AsPlainText -Force) }
+            $val = $script:answers3[$script:idx3]; $script:idx3++; return $val
+        }
+        Mock Test-Path { $true } -ParameterFilter { $Path -eq 'C:\fake\cntlm.exe' }
+        Mock Get-CntlmNtlmHash {
+            @('PassNTLMv2      AABBCCDDEEFF0011')
+        }
+
+        $out = Join-Path $TestDrive 'cntlm3.ini'
+        $warnings = & {
+            New-CntlmConfiguration -OutputPath $out -CntlmExePath 'C:\fake\cntlm.exe' | Out-Null
+        } 3>&1 | Where-Object { $_ -is [System.Management.Automation.WarningRecord] }
+
+        $content = Get-Content $out -Raw
+        $content | Should -Match 'PassNTLMv2\s+AABBCCDDEEFF0011'
+        $content | Should -Not -Match 'Password\s+S3cr3t!'
+        ($warnings -join "`n") | Should -Not -Match 'cntlm -H -u userid -d DOMINIO'
+    }
+
+    It 'falls back to the plaintext password and warns when hash generation fails' {
+        $script:answers4 = @('DOMINIO','userid','proxy.company.net','1234','3128','localhost')
+        $script:idx4 = 0
+        Mock Read-Host {
+            if ($AsSecureString) { return (ConvertTo-SecureString 'S3cr3t!' -AsPlainText -Force) }
+            $val = $script:answers4[$script:idx4]; $script:idx4++; return $val
+        }
+        Mock Test-Path { $true } -ParameterFilter { $Path -eq 'C:\fake\cntlm.exe' }
+        Mock Get-CntlmNtlmHash { throw 'cntlm -H exited with code 1' }
+
+        $out = Join-Path $TestDrive 'cntlm4.ini'
+        $warnings = & {
+            New-CntlmConfiguration -OutputPath $out -CntlmExePath 'C:\fake\cntlm.exe' | Out-Null
+        } 3>&1 | Where-Object { $_ -is [System.Management.Automation.WarningRecord] }
+
+        (Get-Content $out -Raw) | Should -Match 'Password\s+S3cr3t!'
+        ($warnings -join "`n") | Should -Match 'cntlm -H -u userid -d DOMINIO'
+    }
 }

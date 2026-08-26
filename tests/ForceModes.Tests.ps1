@@ -86,6 +86,7 @@ NoProxy localhost
         Mock Start-CntlmProcess {}
         Mock Set-ProxyEnvironmentForCntlm {}
         Mock Set-ExecutionState {}
+        Mock Stop-CntlmProcess {}
     }
 
     It 'fails when CNTLM process does not come up' {
@@ -93,10 +94,19 @@ NoProxy localhost
         Invoke-ForceCntlm -CntlmPath 'C:\fake\cntlm.exe' -IniPath $script:ini | Should -BeFalse
     }
 
-    It 'fails when CNTLM runs but the port is not listening' {
+    It 'fails and stops the process when CNTLM runs but the port is not listening' {
         Mock Test-CntlmRunning { $true }
         Mock Test-TcpPort { $false }
         Invoke-ForceCntlm -CntlmPath 'C:\fake\cntlm.exe' -IniPath $script:ini | Should -BeFalse
+        Should -Invoke Stop-CntlmProcess -Times 1
+    }
+
+    It 'fails and stops the process when the connectivity test fails after startup' {
+        Mock Test-CntlmRunning { $true }
+        Mock Test-TcpPort { $true }
+        Mock Test-ProxyConnectivity { $false }
+        Invoke-ForceCntlm -CntlmPath 'C:\fake\cntlm.exe' -IniPath $script:ini | Should -BeFalse
+        Should -Invoke Stop-CntlmProcess -Times 1
     }
 
     It 'succeeds when process, port and connectivity all check out' {
@@ -105,5 +115,6 @@ NoProxy localhost
         Mock Test-ProxyConnectivity { $true }
         Invoke-ForceCntlm -CntlmPath 'C:\fake\cntlm.exe' -IniPath $script:ini | Should -BeTrue
         Should -Invoke Set-ExecutionState -Times 1
+        Should -Invoke Stop-CntlmProcess -Times 0
     }
 }

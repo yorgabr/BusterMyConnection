@@ -18,8 +18,8 @@ Describe 'Script integrity' {
         $SCRIPT_NAME    | Should -Be 'Buster-MyConnection'
     }
 
-    It 'reports version 2.7.0' {
-        $SCRIPT_VERSION | Should -Be '2.7.0'
+    It 'reports version 2.8.0' {
+        $SCRIPT_VERSION | Should -Be '2.8.0'
     }
 }
 
