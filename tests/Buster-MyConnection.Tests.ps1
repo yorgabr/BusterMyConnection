@@ -1,4 +1,4 @@
-#requires -Version 5.1
+﻿#requires -Version 5.1
 #requires -Modules Pester
 
 BeforeAll {
@@ -18,8 +18,8 @@ Describe 'Script integrity' {
         $SCRIPT_NAME    | Should -Be 'Buster-MyConnection'
     }
 
-    It 'reports version 2.6.0' {
-        $SCRIPT_VERSION | Should -Be '2.6.0'
+    It 'reports version 2.7.0' {
+        $SCRIPT_VERSION | Should -Be '2.7.0'
     }
 }
 

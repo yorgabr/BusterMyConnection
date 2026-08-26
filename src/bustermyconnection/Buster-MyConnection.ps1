@@ -95,7 +95,7 @@
 .NOTES
     File Name : Buster-MyConnection.ps1
     Author    : Yorga Babuscan (yorgabr@gmail.com)
-    Version   : 2.6.0
+    Version   : 2.7.0
 
 .LINK
     https://github.com/yorgabr/BusterMyConnection
@@ -184,7 +184,7 @@ $script:QuietMode = [bool]$Quiet
 #---------------------------------
 # Script Metadata
 #---------------------------------
-$SCRIPT_VERSION = '2.6.0'
+$SCRIPT_VERSION = '2.7.0'
 $SCRIPT_NAME    = 'Buster-MyConnection'
 
 #---------------------------------
@@ -373,7 +373,7 @@ function Set-ExecutionState {
 #---------------------------------
 function Backup-ProxyEnvironmentVariables {
     $backup = @{}
-    Get-ChildItem Env: | Where-Object { $_.Key -match '(?i)proxy' } |
+    Get-ChildItem Env: | Where-Object { $_.Key -match '(?i)(proxy|pip_.*index|uv_.*index)' } |
         ForEach-Object { $backup[$_.Key] = $_.Value }
     return $backup
 }
@@ -382,7 +382,7 @@ function Remove-ProxyEnvironmentVariables {
     # Captures a backup before removal and returns it so callers can persist state.
     $backup = Backup-ProxyEnvironmentVariables
     $count  = 0
-    Get-ChildItem Env: | Where-Object { $_.Key -match '(?i)proxy' } |
+    Get-ChildItem Env: | Where-Object { $_.Key -match '(?i)(proxy|pip_.*index|uv_.*index)' } |
         ForEach-Object {
             Write-Verbose "Unsetting $($_.Key)"
             Remove-Item "Env:\$($_.Key)" -ErrorAction SilentlyContinue
@@ -878,7 +878,7 @@ if ($DotSourceOnly) {
 if ($JustCheck) {
     Out-Info "JustCheck mode: evaluating connectivity without changes."
     Out-Info "Current proxy environment variables:"
-    Get-ChildItem Env: | Where-Object { $_.Key -match '(?i)proxy' } | ForEach-Object {
+    Get-ChildItem Env: | Where-Object { $_.Key -match '(?i)(proxy|pip_.*index|uv_.*index)' } | ForEach-Object {
         Write-Host "  $($_.Key) = $($_.Value)"
     }
 

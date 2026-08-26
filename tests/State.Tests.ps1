@@ -1,4 +1,4 @@
-#requires -Version 5.1
+﻿#requires -Version 5.1
 #requires -Modules Pester
 
 BeforeAll {
@@ -23,7 +23,7 @@ Describe 'Execution state persistence' {
 
     It 'records the script version into the state' {
         Set-ExecutionState -Mode Proxied
-        (Get-PreviousExecutionState).Version | Should -Be '2.6.0'
+        (Get-PreviousExecutionState).Version | Should -Be $SCRIPT_VERSION
     }
 
     It 'returns null and warns when the state file is invalid JSON' {
