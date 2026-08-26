@@ -5,11 +5,14 @@
 
 .DESCRIPTION
     This script embodies a self-healing approach to CNTLM deployment on Windows. Rather
-    than failing when components are missing, it proactively downloads and configures the
-    necessary infrastructure. The script detects whether CNTLM is installed in the
-    expected portable location, and if absent, retrieves the latest stable build from the
-    community-maintained repository. Should the configuration file be missing, it engages
-    the user in a guided interview to establish the essential proxy settings.
+    than failing when components are missing, it proactively installs and configures the
+    necessary infrastructure. The script detects whether CNTLM is installed at the given
+    path, and if absent, installs it via Scoop (https://scoop.sh), which resolves the
+    package over HTTPS and verifies it against its manifest hash. Scoop itself must
+    already be installed; the script will not bootstrap it. Should the configuration file
+    be missing, it engages the user in a guided interview to establish the essential proxy
+    settings, and where possible derives the NTLM password hash automatically (via
+    `cntlm -H`) instead of storing the plaintext password.
 
     The script implements a stateful connection management system that tracks whether
     the previous execution was in "direct access" mode (proxy variables unset). When
@@ -95,7 +98,7 @@
 .NOTES
     File Name : Buster-MyConnection.ps1
     Author    : Yorga Babuscan (yorgabr@gmail.com)
-    Version   : 2.7.0
+    Version   : 2.8.0
 
 .LINK
     https://github.com/yorgabr/BusterMyConnection
@@ -184,7 +187,7 @@ $script:QuietMode = [bool]$Quiet
 #---------------------------------
 # Script Metadata
 #---------------------------------
-$SCRIPT_VERSION = '2.7.0'
+$SCRIPT_VERSION = '2.8.0'
 $SCRIPT_NAME    = 'Buster-MyConnection'
 
 #---------------------------------
@@ -619,46 +622,40 @@ function Test-CntlmRunning {
 }
 
 #---------------------------------
-# CNTLM Installation
+# CNTLM Installation (via Scoop)
 #---------------------------------
-function Install-CntlmPortable {
-    param([string]$TargetPath)
+function Install-CntlmViaScoop {
+    <#
+        Installs CNTLM through Scoop (https://scoop.sh) instead of downloading a
+        hand-picked binary over plain HTTP. Scoop resolves the package over HTTPS,
+        verifies its hash against the manifest, and manages upgrades/uninstalls,
+        which removes the integrity risk of an unauthenticated zip download.
+    #>
+    Out-Info "CNTLM not found. Installing via Scoop..."
 
-    Out-Info "CNTLM not found. Initiating automatic installation..."
-
-    $downloadUrl = 'http://downloads.sourceforge.net/project/cntlm/cntlm/cntlm%200.92.3/cntlm-0.92.3-win32.zip'
-    $zipPath = Join-Path $env:TEMP 'cntlm.zip'
-    $extractPath = Join-Path $env:TEMP 'cntlm_extract'
+    $scoopCmd = Get-Command scoop -ErrorAction SilentlyContinue
+    if (-not $scoopCmd) {
+        throw "Scoop is not installed. Install it first (as your own user, not elevated): " +
+              "irm get.scoop.sh | iex -- then re-run this script. See https://scoop.sh"
+    }
 
     try {
-        Out-Info "Downloading CNTLM from $downloadUrl..."
-        Invoke-WebRequest -Uri $downloadUrl -OutFile $zipPath -UseBasicParsing
-
-        Out-Info "Extracting CNTLM to $extractPath..."
-        Expand-Archive -Path $zipPath -DestinationPath $extractPath -Force
-
-        if (-not (Test-Path $TargetPath)) {
-            New-Item -ItemType Directory -Path $TargetPath -Force | Out-Null
-        }
-
-        $exeSource = Get-ChildItem -Path $extractPath -Filter 'cntlm.exe' -Recurse | Select-Object -First 1
-        if (-not $exeSource) {
-            throw "cntlm.exe not found in downloaded archive"
-        }
-
-        $exeDest = Join-Path $TargetPath 'cntlm.exe'
-        Copy-Item -Path $exeSource.FullName -Destination $exeDest -Force
-
-        Out-Success "CNTLM installed successfully to $exeDest"
-        return $exeDest
-
+        & scoop install cntlm 2>&1 | ForEach-Object { Write-Verbose $_ }
     } catch {
-        Out-Error "Failed to install CNTLM: $($_.Exception.Message)"
-        throw
-    } finally {
-        Remove-Item $zipPath -ErrorAction SilentlyContinue
-        Remove-Item $extractPath -Recurse -Force -ErrorAction SilentlyContinue
+        throw "Failed to install CNTLM via Scoop: $($_.Exception.Message)"
     }
+
+    $exePath = (& scoop which cntlm 2>$null)
+    if (-not $exePath) {
+        $exePath = (Get-Command cntlm.exe -ErrorAction SilentlyContinue).Source
+    }
+
+    if (-not $exePath -or -not (Test-Path $exePath)) {
+        throw "Scoop reported CNTLM as installed, but cntlm.exe could not be located afterwards."
+    }
+
+    Out-Success "CNTLM installed successfully via Scoop: $exePath"
+    return $exePath
 }
 
 function Resolve-CntlmExecutable {
@@ -667,14 +664,64 @@ function Resolve-CntlmExecutable {
         Out-Info "CNTLM found at $Path"
         return $Path
     }
-    return Install-CntlmPortable -TargetPath (Split-Path -Parent $Path)
+    return Install-CntlmViaScoop
 }
 
 #---------------------------------
 # CNTLM Configuration Wizard
 #---------------------------------
+function Get-CntlmNtlmHash {
+    <#
+        Runs `cntlm.exe -H` to derive the NTLM/NTLMv2 password hashes for the given
+        account, feeding the password over stdin (never as a command-line argument,
+        which would leak it into the process list). Returns the PassLM/PassNT/
+        PassNTLMv2 lines exactly as cntlm prints them, ready to drop into cntlm.ini.
+    #>
+    param(
+        [string]$CntlmExePath,
+        [string]$Username,
+        [string]$Domain,
+        [string]$Password
+    )
+
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $CntlmExePath
+    $psi.Arguments = "-H -u $Username -d $Domain"
+    $psi.RedirectStandardInput = $true
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+
+    $proc = [System.Diagnostics.Process]::Start($psi)
+    $proc.StandardInput.WriteLine($Password)
+    $proc.StandardInput.Close()
+
+    $stdout = $proc.StandardOutput.ReadToEnd()
+    $stderr = $proc.StandardError.ReadToEnd()
+    $proc.WaitForExit()
+
+    if ($proc.ExitCode -ne 0) {
+        throw "cntlm -H exited with code $($proc.ExitCode): $stderr"
+    }
+
+    $hashLines = $stdout -split "`r?`n" | Where-Object { $_ -match '^Pass(LM|NT|NTLMv2)\s' }
+    if (-not $hashLines) {
+        throw "cntlm -H produced no recognizable hash lines."
+    }
+
+    return $hashLines
+}
+
 function New-CntlmConfiguration {
-    param([string]$OutputPath)
+    param(
+        [string]$OutputPath,
+        # Path to a working cntlm.exe, used to derive password hashes so the
+        # plaintext password never touches disk. Optional: if omitted or the
+        # binary can't run '-H' yet, the wizard falls back to storing the
+        # plaintext password and warns the user to hash it manually later.
+        [string]$CntlmExePath
+    )
 
     Out-Info "=== CNTLM Configuration Wizard ==="
 
@@ -697,7 +744,24 @@ function New-CntlmConfiguration {
     $bstr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($password)
     $plainPassword = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($bstr)
 
-    Out-Warn "For production use, generate a proper NTLM hash using: cntlm -H -u $username -d $domain"
+    $credentialLines = $null
+    if ($CntlmExePath -and (Test-Path $CntlmExePath)) {
+        try {
+            $hashLines = Get-CntlmNtlmHash -CntlmExePath $CntlmExePath -Username $username -Domain $domain -Password $plainPassword
+            $credentialLines = $hashLines -join "`r`n"
+            Out-Success "Generated NTLM password hash automatically; the plaintext password will not be stored."
+        } catch {
+            Out-Warn "Could not generate NTLM hash automatically ($($_.Exception.Message)); storing the plaintext password instead."
+        }
+    }
+
+    if (-not $credentialLines) {
+        $credentialLines = "Password    $plainPassword"
+        Out-Warn "For production use, generate a proper NTLM hash using: cntlm -H -u $username -d $domain"
+    }
+
+    [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+    $plainPassword = $null
 
     $configContent = @"
 # CNTLM Configuration
@@ -705,7 +769,7 @@ function New-CntlmConfiguration {
 
 Username    $username
 Domain      $domain
-Password    $plainPassword
+$credentialLines
 Proxy       ${proxyAddress}:${proxyPort}
 Listen      $listenPort
 NoProxy     $noProxy
@@ -797,7 +861,7 @@ function Invoke-ForceCntlm {
     if (-not (Test-Path $IniPath)) {
         Out-Info "CNTLM configuration not found. Launching configuration wizard..."
         try {
-            $IniPath = New-CntlmConfiguration -OutputPath $IniPath
+            $IniPath = New-CntlmConfiguration -OutputPath $IniPath -CntlmExePath $resolvedExe
         } catch {
             Out-Error "Configuration wizard failed: $($_.Exception.Message)"
             return $false
@@ -845,6 +909,7 @@ function Invoke-ForceCntlm {
     if (-not (Test-TcpPort -Address '127.0.0.1' -Port $listenPort -TimeoutSeconds 3)) {
         Out-Error "CNTLM is running but not listening on port $listenPort"
         Out-Info "Please check CNTLM configuration and logs."
+        Stop-CntlmProcess
         return $false
     }
 
@@ -861,6 +926,7 @@ function Invoke-ForceCntlm {
         Out-Info "  2. Invalid credentials in cntlm.ini"
         Out-Info "  3. CNTLM configuration error"
         Out-Info "  4. Network/firewall blocking external connectivity"
+        Stop-CntlmProcess
         return $false
     }
 }
@@ -969,7 +1035,7 @@ if ($resolvedExe) {
     if (-not (Test-Path $IniPath)) {
         Out-Info "CNTLM configuration not found. Launching configuration wizard..."
         try {
-            $IniPath = New-CntlmConfiguration -OutputPath $IniPath
+            $IniPath = New-CntlmConfiguration -OutputPath $IniPath -CntlmExePath $resolvedExe
         } catch {
             Out-Warn "Configuration wizard failed: $($_.Exception.Message)"
             $resolvedExe = $null
@@ -993,6 +1059,7 @@ if ($resolvedExe -and (Test-Path $IniPath)) {
                 exit 0
             } else {
                 Out-Warn "CNTLM started but connectivity test failed."
+                Stop-CntlmProcess
             }
         }
     } catch {

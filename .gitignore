@@ -5,6 +5,8 @@
 htmlcov/
 .tox/
 .nox/
+coverage/
+coverage/coverage.xml
 .coverage
 .coverage.*
 .cache

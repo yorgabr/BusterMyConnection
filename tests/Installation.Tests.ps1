@@ -6,36 +6,37 @@ BeforeAll {
     . $script:ScriptPath -DotSourceOnly
 }
 
-Describe 'Install-CntlmPortable' {
+Describe 'Install-CntlmViaScoop' {
 
-    BeforeEach {
-        Mock Invoke-WebRequest {}
-        Mock Expand-Archive {}
-        Mock Copy-Item {}
-        Mock New-Item {}
-        Mock Remove-Item {}
+    It 'throws with an actionable message when scoop is not on PATH' {
+        Mock Get-Command { $null } -ParameterFilter { $Name -eq 'scoop' }
+
+        { Install-CntlmViaScoop } | Should -Throw '*Scoop is not installed*'
     }
 
-    It 'copies the discovered cntlm.exe and returns its destination path' {
-        Mock Test-Path { $false }
-        Mock Get-ChildItem {
-            [pscustomobject]@{ FullName = 'C:\extract\cntlm.exe' }
-        } -ParameterFilter { $Filter -eq 'cntlm.exe' }
-
-        $target = Join-Path $TestDrive 'CNTLM'
-        $result = Install-CntlmPortable -TargetPath $target
-
-        $result | Should -Be (Join-Path $target 'cntlm.exe')
-        Should -Invoke Invoke-WebRequest -Times 1
-        Should -Invoke Expand-Archive -Times 1
-        Should -Invoke Copy-Item -Times 1
-    }
-
-    It 'throws when the archive contains no cntlm.exe' {
+    It 'installs via scoop and returns the resolved cntlm.exe path' {
+        Mock Get-Command { [pscustomobject]@{ Name = 'scoop' } } -ParameterFilter { $Name -eq 'scoop' }
         Mock Test-Path { $true }
-        Mock Get-ChildItem { $null } -ParameterFilter { $Filter -eq 'cntlm.exe' }
 
-        { Install-CntlmPortable -TargetPath (Join-Path $TestDrive 'CNTLM') } | Should -Throw
+        function scoop { }
+        Mock scoop { 'C:\Users\me\scoop\shims\cntlm.exe' } -ParameterFilter { $args -contains 'which' }
+        Mock scoop { } -ParameterFilter { $args -contains 'install' }
+
+        $result = Install-CntlmViaScoop
+
+        $result | Should -Be 'C:\Users\me\scoop\shims\cntlm.exe'
+    }
+
+    It 'throws when scoop install succeeds but cntlm.exe cannot be located' {
+        Mock Get-Command { [pscustomobject]@{ Name = 'scoop' } } -ParameterFilter { $Name -eq 'scoop' }
+        Mock Test-Path { $false }
+
+        function scoop { }
+        Mock scoop { $null } -ParameterFilter { $args -contains 'which' }
+        Mock scoop { } -ParameterFilter { $args -contains 'install' }
+        Mock Get-Command { $null } -ParameterFilter { $Name -eq 'cntlm.exe' }
+
+        { Install-CntlmViaScoop } | Should -Throw '*could not be located*'
     }
 }
 
@@ -43,18 +44,18 @@ Describe 'Resolve-CntlmExecutable' {
 
     It 'returns the path unchanged when the executable already exists' {
         Mock Test-Path { $true }
-        Mock Install-CntlmPortable { 'C:\should\not\be\called.exe' }
+        Mock Install-CntlmViaScoop { 'C:\should\not\be\called.exe' }
 
         $p = 'C:\tools\cntlm\cntlm.exe'
         Resolve-CntlmExecutable -Path $p | Should -Be $p
-        Should -Invoke Install-CntlmPortable -Times 0
+        Should -Invoke Install-CntlmViaScoop -Times 0
     }
 
-    It 'delegates to Install-CntlmPortable when the executable is missing' {
+    It 'delegates to Install-CntlmViaScoop when the executable is missing' {
         Mock Test-Path { $false }
-        Mock Install-CntlmPortable { 'C:\installed\cntlm.exe' }
+        Mock Install-CntlmViaScoop { 'C:\scoop\shims\cntlm.exe' }
 
-        Resolve-CntlmExecutable -Path 'C:\tools\cntlm\cntlm.exe' | Should -Be 'C:\installed\cntlm.exe'
-        Should -Invoke Install-CntlmPortable -Times 1
+        Resolve-CntlmExecutable -Path 'C:\tools\cntlm\cntlm.exe' | Should -Be 'C:\scoop\shims\cntlm.exe'
+        Should -Invoke Install-CntlmViaScoop -Times 1
     }
 }
