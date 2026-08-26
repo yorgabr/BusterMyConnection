@@ -24,7 +24,7 @@ The result is not cleverness for its own sake, but continuity. Tools continue to
 
 At its core, Buster‑MyConnection follows a structured decision process.
 
-**First**, it verifies infrastructure. If CNTLM is not present in its expected portable location, the script retrieves the latest stable Windows build from the community‑maintained repository and performs a user‑local installation that requires no administrative privileges and leaves no registry footprint.
+**First**, it verifies infrastructure. If CNTLM is not present at the configured path, the script installs it via [Scoop](https://scoop.sh) (`scoop install cntlm`), which requires no administrative privileges, resolves the package over HTTPS, and verifies it against Scoop's manifest hash. Scoop itself must already be installed and on `PATH`; the script does not bootstrap Scoop for you.
 
 **Second**, it resolves configuration. An existing `cntlm.ini` is located via explicit path or discovery. If none exists, the script launches an interactive wizard that validates input, explains security trade‑offs, and produces a usable, well‑commented configuration file with sensible defaults.
 
