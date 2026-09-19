@@ -54,7 +54,9 @@
     Preserves any running CNTLM instances instead of restarting.
 
 .PARAMETER Quiet
-    Suppresses informational output. Errors and warnings are still displayed.
+    Suppresses informational and success output (the Out-Info/Out-Success
+    helpers). Warnings and errors are always displayed regardless of -Quiet.
+    Combine with -Verbose to force informational output back on too.
 
 .PARAMETER JustCheck
     Diagnostic mode. Evaluates connectivity strategies without making changes.
@@ -99,7 +101,7 @@
 .NOTES
     File Name : Buster-MyConnection.ps1
     Author    : Yorga Babuscan (yorgabr@gmail.com)
-    Version   : 2.8.1
+    Version   : 2.9.0
 
 .LINK
     https://github.com/yorgabr/BusterMyConnection
@@ -128,7 +130,6 @@ param(
 
     [Parameter(ParameterSetName='Standard')]
     [Parameter(ParameterSetName='Force')]
-    [Parameter(ParameterSetName='Check')]
     [switch]$Quiet,
 
     [Parameter(ParameterSetName='Check', Mandatory=$true)]
@@ -188,7 +189,7 @@ $script:QuietMode = [bool]$Quiet
 #---------------------------------
 # Script Metadata
 #---------------------------------
-$SCRIPT_VERSION = '2.8.1'
+$SCRIPT_VERSION = '2.9.0'
 $SCRIPT_NAME    = 'Buster-MyConnection'
 
 #---------------------------------
@@ -203,19 +204,27 @@ function Out-Info {
 
 function Out-Success {
     param([string]$Message)
-    Write-Host "[SUCCESS] $Message" -ForegroundColor Green
+    if (-not $script:QuietMode -or $IsVerbose) {
+        Write-Host "[SUCCESS] $Message" -ForegroundColor Green
+    }
 }
 
 function Out-Warn {
     param([string]$Message)
+    # Deliberately NOT gated by $script:QuietMode: -Quiet is meant to silence
+    # routine chatter (Out-Info/Out-Success), not diagnostics. Warnings stay
+    # visible in quiet mode by design - both because that's the conventional
+    # meaning of "quiet" for a CLI tool, and because Wizard.Tests.ps1 and
+    # State.Tests.ps1 capture this exact stream (via `3>&1`) to assert on the
+    # warning text; gating this on QuietMode would silently break those
+    # assertions the moment -Quiet is passed.
     Write-Warning $Message
 }
 
 function Out-Error {
     param([string]$Message)
-    # Business-level failures are control flow (callers return $false / exit 1),
-    # not terminating exceptions. Emit to the error stream without honoring the
-    # script-wide 'Stop' preference, so functions can complete their return path.
+    # Same reasoning as Out-Warn above: errors are not "routine chatter" and
+    # must remain visible regardless of -Quiet.
     Write-Error $Message -ErrorAction Continue
 }
 
@@ -275,7 +284,6 @@ function Get-ProxyCredential {
 
     Out-Info "Corporate proxy requires authentication."
 
-    # NTLM identity needs the domain; this is NOT what goes into a URL userinfo.
     if ($Domain) {
         $fullUsername = "$Domain\$Username"
     } else {
@@ -297,16 +305,9 @@ function Get-ProxyCredential {
 }
 
 #---------------------------------
-# Proxy URL construction (the core fix)
+# Proxy URL construction
 #---------------------------------
 function ConvertTo-ProxyUserInfo {
-    <#
-        Builds the userinfo segment (user:pass@) of an HTTP proxy URL.
-        Critically, it strips any NTLM domain prefix (DOMAIN\user or user@DOMAIN)
-        because a backslash or slash in userinfo makes Git/libcurl treat the URL as
-        having a path, which only SOCKS proxies support. The username and password are
-        URL-encoded so reserved characters survive.
-    #>
     param(
         [string]$Username,
         [string]$Password
@@ -316,12 +317,10 @@ function ConvertTo-ProxyUserInfo {
         return ''
     }
 
-    # Strip DOMAIN\user
     $bare = $Username
     if ($bare -match '\\') {
         $bare = ($bare -split '\\', 2)[1]
     }
-    # Strip user@DOMAIN (UPN form), keep the left side
     elseif ($bare -match '@') {
         $bare = ($bare -split '@', 2)[0]
     }
@@ -376,22 +375,37 @@ function Set-ExecutionState {
 # Proxy environment helpers
 #---------------------------------
 function Backup-ProxyEnvironmentVariables {
+    <#
+        Captures all proxy and package manager (Pip, UV) index variables from the process scope.
+        Extends the regex filter to include python package index overrides so that direct
+        access transitions can properly preserve and clean corporate index URLs.
+    #>
     $backup = @{}
-    Get-ChildItem Env: | Where-Object { $_.Key -match '(?i)(proxy|pip_.*index|uv_.*index)' } |
+    Get-ChildItem Env: | Where-Object { $_.Key -match '(?i)(proxy|pip_.*index|uv_.*index|uv_default_index|uv_index)' } |
         ForEach-Object { $backup[$_.Key] = $_.Value }
     return $backup
 }
 
 function Remove-ProxyEnvironmentVariables {
-    # Captures a backup before removal and returns it so callers can persist state.
+    <#
+        Removes all proxy settings and corporate package index overrides from process memory.
+        Additionally forces UV to bypass local pip.ini configuration files (UV_NO_PIP_CONFIG=1)
+        and explicitly instructs UV to fall back to the public PyPI registry when operating
+        under DIRECT access.
+    #>
     $backup = Backup-ProxyEnvironmentVariables
     $count  = 0
-    Get-ChildItem Env: | Where-Object { $_.Key -match '(?i)(proxy|pip_.*index|uv_.*index)' } |
+    Get-ChildItem Env: | Where-Object { $_.Key -match '(?i)(proxy|pip_.*index|uv_.*index|uv_default_index|uv_index)' } |
         ForEach-Object {
             Write-Verbose "Unsetting $($_.Key)"
             Remove-Item "Env:\$($_.Key)" -ErrorAction SilentlyContinue
             $count++
         }
+
+    # Enforce UV direct PyPI access and bypass lingering pip.ini internal proxy index definitions
+    [System.Environment]::SetEnvironmentVariable('UV_DEFAULT_INDEX', 'https://pypi.org/simple', 'Process')
+    [System.Environment]::SetEnvironmentVariable('UV_NO_PIP_CONFIG', '1', 'Process')
+
     return [pscustomobject]@{
         Backup = $backup
         Count  = $count
@@ -400,9 +414,13 @@ function Remove-ProxyEnvironmentVariables {
 
 function Restore-ProxyEnvironmentVariables {
     param($Variables)
+
+    # Clean up UV direct overrides when restoring proxied environment
+    [System.Environment]::SetEnvironmentVariable('UV_NO_PIP_CONFIG', $null, 'Process')
+    [System.Environment]::SetEnvironmentVariable('UV_DEFAULT_INDEX', $null, 'Process')
+
     if (-not $Variables) { return }
 
-    # Accept both hashtables and PSCustomObjects (from JSON).
     if ($Variables -is [hashtable]) {
         foreach ($key in $Variables.Keys) {
             $val = $Variables[$key]
@@ -430,6 +448,9 @@ function Set-ProxyEnvironmentForCntlm {
     [System.Environment]::SetEnvironmentVariable('ALL_PROXY',   $proxy, 'Process')
     [System.Environment]::SetEnvironmentVariable('NO_PROXY',    $NoProxy, 'Process')
 
+    # Allow UV to evaluate pip config files when using corporate proxy
+    [System.Environment]::SetEnvironmentVariable('UV_NO_PIP_CONFIG', $null, 'Process')
+
     Out-Info "Proxy environment variables exported for CNTLM on port $Port"
     Out-Info "NO_PROXY set to: $NoProxy"
 }
@@ -455,7 +476,9 @@ function Set-ProxyEnvironmentForCorporate {
     [System.Environment]::SetEnvironmentVariable('ALL_PROXY',   $proxy, 'Process')
     [System.Environment]::SetEnvironmentVariable('NO_PROXY',    $NoProxy, 'Process')
 
-    # Log without leaking credentials.
+    # Allow UV to evaluate pip config files when using corporate proxy
+    [System.Environment]::SetEnvironmentVariable('UV_NO_PIP_CONFIG', $null, 'Process')
+
     Out-Info "Proxy environment variables exported for corporate proxy: http://${ProxyAddress}:${ProxyPort}"
     Out-Info "NO_PROXY set to: $NoProxy"
 }
@@ -626,12 +649,6 @@ function Test-CntlmRunning {
 # CNTLM Installation (via Scoop)
 #---------------------------------
 function Install-CntlmViaScoop {
-    <#
-        Installs CNTLM through Scoop (https://scoop.sh) instead of downloading a
-        hand-picked binary over plain HTTP. Scoop resolves the package over HTTPS,
-        verifies its hash against the manifest, and manages upgrades/uninstalls,
-        which removes the integrity risk of an unauthenticated zip download.
-    #>
     Out-Info "CNTLM not found. Installing via Scoop..."
 
     $scoopCmd = Get-Command scoop -ErrorAction SilentlyContinue
@@ -675,12 +692,6 @@ function Resolve-CntlmExecutable {
 # CNTLM Configuration Wizard
 #---------------------------------
 function Get-CntlmNtlmHash {
-    <#
-        Runs `cntlm.exe -H` to derive the NTLM/NTLMv2 password hashes for the given
-        account, feeding the password over stdin (never as a command-line argument,
-        which would leak it into the process list). Returns the PassLM/PassNT/
-        PassNTLMv2 lines exactly as cntlm prints them, ready to drop into cntlm.ini.
-    #>
     param(
         [string]$CntlmExePath,
         [string]$Username,
@@ -720,10 +731,6 @@ function Get-CntlmNtlmHash {
 function New-CntlmConfiguration {
     param(
         [string]$OutputPath,
-        # Path to a working cntlm.exe, used to derive password hashes so the
-        # plaintext password never touches disk. Optional: if omitted or the
-        # binary can't run '-H' yet, the wizard falls back to storing the
-        # plaintext password and warns the user to hash it manually later.
         [string]$CntlmExePath
     )
 
@@ -811,7 +818,13 @@ function Invoke-ForceDirect {
 }
 
 function Invoke-ForceProxy {
-    param([string]$IniPath)
+    # IniPath defaults to $env:CNTLM_INI (rather than being left unbound) so this
+    # function stays independently callable/testable - e.g. from Pester - without
+    # going through the script's top-level parameter binding. [string] parameters
+    # left unbound coerce to an empty string in PowerShell, and Test-Path rejects
+    # an empty -Path with a ParameterBindingValidationException before any Mock
+    # can intercept the call, so a $null/unset default here is not safe.
+    param([string]$IniPath = $env:CNTLM_INI)
 
     Out-Info "Force mode: PROXY - Configuring corporate proxy from cntlm.ini"
 
@@ -851,7 +864,12 @@ function Invoke-ForceProxy {
 }
 
 function Invoke-ForceCntlm {
-    param([string]$CntlmPath, [string]$IniPath)
+    # CntlmPath/IniPath default to CNTLM_EXE/CNTLM_INI for the same reason as
+    # Invoke-ForceProxy above: keep the function safely callable on its own.
+    param(
+        [string]$CntlmPath = $env:CNTLM_EXE,
+        [string]$IniPath = $env:CNTLM_INI
+    )
 
     Out-Info "Force mode: CNTLM - Ensuring CNTLM is installed and running"
 
@@ -887,7 +905,13 @@ function Invoke-ForceCntlm {
     }
 
     try {
-        Start-CntlmProcess -ExePath $resolvedExe -IniPath $IniPath
+        # Piped to Out-Null on purpose: Start-CntlmProcess is a side-effecting
+        # call with no meaningful return value. Without this, any value a
+        # caller (or a test double standing in for it) happens to emit would
+        # silently join Invoke-ForceCntlm's own output stream, turning the
+        # single boolean this function promises to return into a multi-item
+        # array further down.
+        Start-CntlmProcess -ExePath $resolvedExe -IniPath $IniPath | Out-Null
     } catch {
         Out-Error "Failed to start CNTLM: $($_.Exception.Message)"
         return $false
@@ -936,7 +960,7 @@ function Invoke-ForceCntlm {
 }
 
 #---------------------------------
-# Testability guard: stop here when only function definitions are needed.
+# Testability guard
 #---------------------------------
 if ($DotSourceOnly) {
     return
@@ -948,7 +972,7 @@ if ($DotSourceOnly) {
 if ($JustCheck) {
     Out-Info "JustCheck mode: evaluating connectivity without changes."
     Out-Info "Current proxy environment variables:"
-    Get-ChildItem Env: | Where-Object { $_.Key -match '(?i)(proxy|pip_.*index|uv_.*index)' } | ForEach-Object {
+    Get-ChildItem Env: | Where-Object { $_.Key -match '(?i)(proxy|pip_.*index|uv_.*index|uv_default_index|uv_index)' } | ForEach-Object {
         Write-Host "  $($_.Key) = $($_.Value)"
     }
 
@@ -1050,7 +1074,9 @@ if ($resolvedExe) {
 if ($resolvedExe -and (Test-Path $IniPath)) {
     try {
         $config = Get-CntlmConfiguration -IniPath $IniPath
-        Start-CntlmProcess -ExePath $resolvedExe -IniPath $IniPath
+        # Same Out-Null rationale as in Invoke-ForceCntlm: keep this call
+        # silent so no stray object ever escapes onto the console/pipeline.
+        Start-CntlmProcess -ExePath $resolvedExe -IniPath $IniPath | Out-Null
 
         if (Test-CntlmRunning) {
             Set-ProxyEnvironmentForCntlm -Port $config.Listen -NoProxy $config.NoProxy

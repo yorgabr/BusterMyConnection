@@ -4,7 +4,11 @@
 
 BeforeAll {
     $script:ScriptPath = (Resolve-Path (Join-Path $PSScriptRoot '..\src\bustermyconnection\Buster-MyConnection.ps1')).Path
-    . $script:ScriptPath -DotSourceOnly
+    # -DotSourceOnly skips the real auto-detection flow. -Quiet silences
+    # Out-Info/Out-Success only - Out-Warn (which the Its below capture via
+    # `3>&1` to assert on the NTLM-hash warning text) is never affected by
+    # -Quiet, so it's safe to use here too.
+    . $script:ScriptPath -DotSourceOnly -Quiet
 }
 
 Describe 'New-CntlmConfiguration' {

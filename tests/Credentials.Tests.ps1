@@ -3,7 +3,10 @@
 
 BeforeAll {
     $script:ScriptPath = (Resolve-Path (Join-Path $PSScriptRoot '..\src\bustermyconnection\Buster-MyConnection.ps1')).Path
-    . $script:ScriptPath -DotSourceOnly
+    # -DotSourceOnly skips the real auto-detection flow; -Quiet silences
+    # the Out-Info/Out-Success/Out-Warn/Out-Error helpers so the tests
+    # below (which don't assert on message text) don't spam the console.
+    . $script:ScriptPath -DotSourceOnly -Quiet
 }
 
 Describe 'Proxy credential cache' {
