@@ -9,9 +9,10 @@ jobs:
     runs-on: windows-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      - name: Set up PowerShell
+      - name: Inspect PowerShell environment
         shell: pwsh
         run: |
           $PSVersionTable
@@ -19,19 +20,19 @@ jobs:
       - name: Install Invoke-Build
         shell: pwsh
         run: |
-          Install-Module InvokeBuild -Force -Scope CurrentUser -SkipPublisherCheck
+          Install-Module -Name InvokeBuild -MinimumVersion 5.0.0 -Force -Scope CurrentUser -SkipPublisherCheck
 
       - name: Install Pester
         shell: pwsh
         run: |
-          Install-Module Pester -MinimumVersion 6.0.0 -Force -Scope CurrentUser -SkipPublisherCheck
+          Install-Module -Name Pester -MinimumVersion 5.0.0 -Force -Scope CurrentUser -SkipPublisherCheck
 
       - name: Install PSScriptAnalyzer
         shell: pwsh
         run: |
-          Install-Module PSScriptAnalyzer -MinimumVersion 1.24.0 -Force -Scope CurrentUser -SkipPublisherCheck
+          Install-Module -Name PSScriptAnalyzer -MinimumVersion 1.21.0 -Force -Scope CurrentUser -SkipPublisherCheck
 
-      - name: Run build
+      - name: Run build pipeline via Invoke-Build
         shell: pwsh
         run: |
           Invoke-Build

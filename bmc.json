@@ -1,0 +1,21 @@
+{
+    "version": "1.0.0",
+    "description": "BusterMyConnection - Connection diagnostics and management tool",
+    "homepage": "https://github.com/mvalente/BusterMyConnection",
+    "license": "MIT",
+    "architecture": {
+        "64bit": {
+            "url": "https://github.com/mvalente/BusterMyConnection/releases/download/v1.0.0/dist.zip",
+            "hash": "SHA256_HASH_DO_DIST_ZIP"
+        }
+    },
+    "bin": "bmc.ps1",
+    "checkver": "github",
+    "autoupdate": {
+        "architecture": {
+            "64bit": {
+                "url": "https://github.com/mvalente/BusterMyConnection/releases/download/v$version/dist.zip"
+            }
+        }
+    }
+}

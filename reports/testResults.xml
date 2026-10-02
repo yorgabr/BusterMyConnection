@@ -1,0 +1,63 @@
+﻿<?xml version="1.0" encoding="utf-8" standalone="no"?>
+<test-results xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="nunit_schema_2.5.xsd" name="Pester" total="18" errors="0" failures="0" not-run="0" inconclusive="0" ignored="0" skipped="0" invalid="0" date="2026-10-02" time="12:19:14">
+  <environment clr-version="4.0.30319.42000" user-domain="BNDES" cwd="C:\Users\mvale\Projetinhos\BusterMyConnection" platform="Microsoft Windows 11 Enterprise|C:\WINDOWS|\Device\Harddisk0\Partition5" machine-name="N-00956422" nunit-version="2.5.8.0" os-version="10.0.26100" user="MVALE" />
+  <culture-info current-culture="pt-BR" current-uiculture="pt-BR" />
+  <test-suite type="TestFixture" name="Pester" executed="True" result="Success" success="True" time="5.6165" asserts="0" description="Pester">
+    <results>
+      <test-suite type="TestFixture" name="C:\Users\mvale\Projetinhos\BusterMyConnection\bmc.Tests.ps1" executed="True" result="Success" success="True" time="5.6165" asserts="0" description="C:\Users\mvale\Projetinhos\BusterMyConnection\bmc.Tests.ps1">
+        <results>
+          <test-suite type="TestFixture" name="BusterMyConnection (bmc) - Unit Test Suite" executed="True" result="Success" success="True" time="5.4508" asserts="0" description="BusterMyConnection (bmc) - Unit Test Suite">
+            <results>
+              <test-suite type="TestFixture" name="BusterMyConnection (bmc) - Unit Test Suite.Get-BmcPacUrlFromRegistry" executed="True" result="Success" success="True" time="0.3746" asserts="0" description="BusterMyConnection (bmc) - Unit Test Suite.Get-BmcPacUrlFromRegistry">
+                <results>
+                  <test-case description="Returns PAC URL when present in Windows Registry" name="BusterMyConnection (bmc) - Unit Test Suite.Get-BmcPacUrlFromRegistry.Returns PAC URL when present in Windows Registry" time="0.157" asserts="0" success="True" result="Success" executed="True" />
+                  <test-case description="Returns $null when AutoConfigURL property is empty or missing" name="BusterMyConnection (bmc) - Unit Test Suite.Get-BmcPacUrlFromRegistry.Returns $null when AutoConfigURL property is empty or missing" time="0.0897" asserts="0" success="True" result="Success" executed="True" />
+                  <test-case description="Handles Registry access failures by returning $null and logging a warning" name="BusterMyConnection (bmc) - Unit Test Suite.Get-BmcPacUrlFromRegistry.Handles Registry access failures by returning $null and logging a warning" time="0.1147" asserts="0" success="True" result="Success" executed="True" />
+                </results>
+              </test-suite>
+              <test-suite type="TestFixture" name="BusterMyConnection (bmc) - Unit Test Suite.Get-BmcPxBinaryPath" executed="True" result="Success" success="True" time="0.908" asserts="0" description="BusterMyConnection (bmc) - Unit Test Suite.Get-BmcPxBinaryPath">
+                <results>
+                  <test-case description="Locates px.exe when present in system PATH" name="BusterMyConnection (bmc) - Unit Test Suite.Get-BmcPxBinaryPath.Locates px.exe when present in system PATH" time="0.0756" asserts="0" success="True" result="Success" executed="True" />
+                  <test-case description="Locates px.exe in default Scoop directory if not in PATH" name="BusterMyConnection (bmc) - Unit Test Suite.Get-BmcPxBinaryPath.Locates px.exe in default Scoop directory if not in PATH" time="0.0954" asserts="0" success="True" result="Success" executed="True" />
+                  <test-case description="Returns $null when Px Proxy executable is not found" name="BusterMyConnection (bmc) - Unit Test Suite.Get-BmcPxBinaryPath.Returns $null when Px Proxy executable is not found" time="0.3469" asserts="0" success="True" result="Success" executed="True" />
+                </results>
+              </test-suite>
+              <test-suite type="TestFixture" name="BusterMyConnection (bmc) - Unit Test Suite.Install-BmcPxProxy" executed="True" result="Success" success="True" time="1.344" asserts="0" description="BusterMyConnection (bmc) - Unit Test Suite.Install-BmcPxProxy">
+                <results>
+                  <test-case description="Returns path immediately if Px Proxy is already installed" name="BusterMyConnection (bmc) - Unit Test Suite.Install-BmcPxProxy.Returns path immediately if Px Proxy is already installed" time="0.0746" asserts="0" success="True" result="Success" executed="True" />
+                  <test-case description="Triggers Scoop installation when binary is missing" name="BusterMyConnection (bmc) - Unit Test Suite.Install-BmcPxProxy.Triggers Scoop installation when binary is missing" time="0.1349" asserts="0" success="True" result="Success" executed="True" />
+                  <test-case description="Throws exception when Scoop is not installed on system" name="BusterMyConnection (bmc) - Unit Test Suite.Install-BmcPxProxy.Throws exception when Scoop is not installed on system" time="0.0881" asserts="0" success="True" result="Success" executed="True" />
+                  <test-case description="Throws exception if Scoop installation fails with exit code" name="BusterMyConnection (bmc) - Unit Test Suite.Install-BmcPxProxy.Throws exception if Scoop installation fails with exit code" time="0.1239" asserts="0" success="True" result="Success" executed="True" />
+                </results>
+              </test-suite>
+              <test-suite type="TestFixture" name="BusterMyConnection (bmc) - Unit Test Suite.Test-BmcPacEndpoint" executed="True" result="Success" success="True" time="2.4315" asserts="0" description="BusterMyConnection (bmc) - Unit Test Suite.Test-BmcPacEndpoint">
+                <results>
+                  <test-case description="Simulates connection failure and returns $false for unreachable PAC endpoints" name="BusterMyConnection (bmc) - Unit Test Suite.Test-BmcPacEndpoint.Simulates connection failure and returns $false for unreachable PAC endpoints" time="1.0705" asserts="0" success="True" result="Success" executed="True" />
+                </results>
+              </test-suite>
+              <test-suite type="TestFixture" name="BusterMyConnection (bmc) - Unit Test Suite.Get-BmcRunningPxProcess" executed="True" result="Success" success="True" time="2.7175" asserts="0" description="BusterMyConnection (bmc) - Unit Test Suite.Get-BmcRunningPxProcess">
+                <results>
+                  <test-case description="Returns process object associated with listening port" name="BusterMyConnection (bmc) - Unit Test Suite.Get-BmcRunningPxProcess.Returns process object associated with listening port" time="0.1961" asserts="0" success="True" result="Success" executed="True" />
+                  <test-case description="Returns $null when no Px Proxy process is found" name="BusterMyConnection (bmc) - Unit Test Suite.Get-BmcRunningPxProcess.Returns $null when no Px Proxy process is found" time="0.0783" asserts="0" success="True" result="Success" executed="True" />
+                </results>
+              </test-suite>
+              <test-suite type="TestFixture" name="BusterMyConnection (bmc) - Unit Test Suite.State Management and Environment Variables (Simulated I/O)" executed="True" result="Success" success="True" time="2.9738" asserts="0" description="BusterMyConnection (bmc) - Unit Test Suite.State Management and Environment Variables (Simulated I/O)">
+                <results>
+                  <test-case description="Enable-BmcDirectAccess removes process proxy variables and persists state" name="BusterMyConnection (bmc) - Unit Test Suite.State Management and Environment Variables (Simulated I/O).Enable-BmcDirectAccess removes process proxy variables and persists state" time="0.1372" asserts="0" success="True" result="Success" executed="True" />
+                  <test-case description="Restore-BmcProxyEnvironment sets proxy environment variables pointing to configured port" name="BusterMyConnection (bmc) - Unit Test Suite.State Management and Environment Variables (Simulated I/O).Restore-BmcProxyEnvironment sets proxy environment variables pointing to configured port" time="0.1031" asserts="0" success="True" result="Success" executed="True" />
+                </results>
+              </test-suite>
+              <test-suite type="TestFixture" name="BusterMyConnection (bmc) - Unit Test Suite.Main Orchestration Flow (Start-BmcOrchestration)" executed="True" result="Success" success="True" time="5.441" asserts="0" description="BusterMyConnection (bmc) - Unit Test Suite.Main Orchestration Flow (Start-BmcOrchestration)">
+                <results>
+                  <test-case description="Enables Direct Access when Registry does not contain PAC URL" name="BusterMyConnection (bmc) - Unit Test Suite.Main Orchestration Flow (Start-BmcOrchestration).Enables Direct Access when Registry does not contain PAC URL" time="0.1006" asserts="0" success="True" result="Success" executed="True" />
+                  <test-case description="Enables Direct Access when PAC file is network unreachable" name="BusterMyConnection (bmc) - Unit Test Suite.Main Orchestration Flow (Start-BmcOrchestration).Enables Direct Access when PAC file is network unreachable" time="0.1212" asserts="0" success="True" result="Success" executed="True" />
+                  <test-case description="Initializes Px Proxy by passing CLI parameters directly (--pac)" name="BusterMyConnection (bmc) - Unit Test Suite.Main Orchestration Flow (Start-BmcOrchestration).Initializes Px Proxy by passing CLI parameters directly (--pac)" time="2.2343" asserts="0" success="True" result="Success" executed="True" />
+                </results>
+              </test-suite>
+            </results>
+          </test-suite>
+        </results>
+      </test-suite>
+    </results>
+  </test-suite>
+</test-results>
