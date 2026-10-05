@@ -3,6 +3,25 @@
 BeforeAll {
     # Import target script definitions without executing the main orchestration flow
     . $PSScriptRoot/bmc.ps1 -DotSourceOnly
+
+    # Provide stub command definitions so Pester can mock cmdlets that may not exist on the
+    # current host (e.g. Get-NetAdapter / Get-DnsClient on non-Windows CI agents or when the
+    # NetTCPIP/DnsClient modules are unavailable). Mocks override these stubs transparently.
+    if (-not (Get-Command -Name 'Get-NetAdapter' -ErrorAction SilentlyContinue)) {
+        function Get-NetAdapter { param([switch] $ErrorAction) }
+    }
+    if (-not (Get-Command -Name 'Get-DnsClient' -ErrorAction SilentlyContinue)) {
+        function Get-DnsClient { param([switch] $ErrorAction) }
+    }
+    if (-not (Get-Command -Name 'scoop' -ErrorAction SilentlyContinue)) {
+        function scoop { }
+    }
+    if (-not (Get-Command -Name 'git' -ErrorAction SilentlyContinue)) {
+        function git { }
+    }
+    if (-not (Get-Command -Name 'npm' -ErrorAction SilentlyContinue)) {
+        function npm { }
+    }
 }
 
 Describe 'BusterMyConnection (bmc) - Unit Test Suite' {
@@ -13,6 +32,220 @@ Describe 'BusterMyConnection (bmc) - Unit Test Suite' {
         Mock Out-Warn {}
         Mock Out-Err {}
         Mock Out-Succ {}
+    }
+
+    Context 'Get-BmcConfig' {
+        BeforeEach {
+            $script:cfgPath = Join-Path -Path $TestDrive -ChildPath 'bmc.config.json'
+        }
+
+        It 'Falls back to the built-in template when the file is absent' {
+            $missing = Join-Path -Path $TestDrive -ChildPath 'does-not-exist.json'
+            $cfg = Get-BmcConfig -Path $missing
+            $cfg.tools | Should -Contain 'Scoop'
+            $cfg.scenarios.Home.proxy | Should -Be 'none'
+        }
+
+        It 'Loads and parses an on-disk config file' {
+            $json = '{ "scenarios": { "Office": { "proxy": "auto", "nexus": true } }, "tools": ["Git"] }'
+            Set-Content -LiteralPath $script:cfgPath -Value $json -Encoding UTF8
+            $cfg = Get-BmcConfig -Path $script:cfgPath
+            $cfg.scenarios.Office.proxy | Should -Be 'auto'
+        }
+
+        It 'Falls back to template and warns on invalid JSON' {
+            Set-Content -LiteralPath $script:cfgPath -Value '{ not valid json' -Encoding UTF8
+            $cfg = Get-BmcConfig -Path $script:cfgPath
+            $cfg.scenarios.Home.proxy | Should -Be 'none'
+            Should -Invoke Out-Warn -Exactly 1
+        }
+    }
+
+    Context 'Get-BmcScenario' {
+        BeforeEach {
+            $script:cfg = Get-BmcTemplateConfig | ConvertTo-Json -Depth 6 | ConvertFrom-Json
+        }
+
+        It 'Returns Vpn when an active adapter matches the VPN pattern' {
+            Mock Get-NetAdapter {
+                return @([PSCustomObject]@{ Status = 'Up'; Name = 'F5 VPN'; InterfaceDescription = 'F5 Networks Virtual Adapter' })
+            }
+            Mock Get-DnsClient { return @() }
+
+            Get-BmcScenario -Config $script:cfg | Should -Be 'Vpn'
+        }
+
+        It 'Returns Office when a DNS suffix matches the office pattern' {
+            Mock Get-NetAdapter { return @() }
+            Mock Get-DnsClient {
+                return @([PSCustomObject]@{ ConnectionSpecificSuffix = 'corp.example.com' })
+            }
+
+            Get-BmcScenario -Config $script:cfg | Should -Be 'Office'
+        }
+
+        It 'Returns Home when nothing matches' {
+            Mock Get-NetAdapter { return @() }
+            Mock Get-DnsClient { return @([PSCustomObject]@{ ConnectionSpecificSuffix = 'lan' }) }
+
+            Get-BmcScenario -Config $script:cfg | Should -Be 'Home'
+        }
+    }
+
+    Context 'Invoke-BmcCli' {
+        It 'Returns the exit code of the native command' -Skip:($env:OS -ne 'Windows_NT') {
+            Invoke-BmcCli -Tool 'cmd.exe' -Arguments @('/c', 'exit 3') | Should -Be 3
+        }
+
+        It 'Does not throw on native stderr output even when ErrorActionPreference is Stop' -Skip:($env:OS -ne 'Windows_NT') {
+            {
+                $ErrorActionPreference = 'Stop'
+                Invoke-BmcCli -Tool 'cmd.exe' -Arguments @('/c', 'echo boom 1>&2 & exit 0')
+            } | Should -Not -Throw
+        }
+
+        It 'Restores the caller ErrorActionPreference' -Skip:($env:OS -ne 'Windows_NT') {
+            $ErrorActionPreference = 'Stop'
+            $null = Invoke-BmcCli -Tool 'cmd.exe' -Arguments @('/c', 'exit 0')
+            $ErrorActionPreference | Should -Be 'Stop'
+        }
+    }
+
+    Context 'Set-BmcToolProxy' {
+        BeforeEach {
+            # Every external CLI call goes through Invoke-BmcCli. Mocking it keeps the real
+            # scoop/git/npm configuration of the machine untouched while the suite runs.
+            Mock Invoke-BmcCli { return 0 }
+        }
+
+        It 'Configures Scoop with host:port and Git with full URL when proxy is set' {
+            Mock Get-Command { return [PSCustomObject]@{ Name = 'scoop' } } -ParameterFilter { $Name -eq 'scoop' }
+            Mock Get-Command { return [PSCustomObject]@{ Name = 'git' } }   -ParameterFilter { $Name -eq 'git' }
+            Mock Get-Command { return $null } -ParameterFilter { $Name -eq 'npm' }
+            Mock Get-Command { return $null } -ParameterFilter { $Name -eq 'uv' }
+
+            Set-BmcToolProxy -ProxyUrl 'http://127.0.0.1:3128'
+
+            Should -Invoke Invoke-BmcCli -Times 1 -Exactly -ParameterFilter {
+                $Tool -eq 'scoop' -and ($Arguments -join ' ') -eq 'config proxy 127.0.0.1:3128'
+            }
+            Should -Invoke Invoke-BmcCli -Times 1 -Exactly -ParameterFilter {
+                $Tool -eq 'git' -and ($Arguments -join ' ') -eq 'config --global http.proxy http://127.0.0.1:3128'
+            }
+            Should -Invoke Invoke-BmcCli -Times 0 -Exactly -ParameterFilter { $Tool -eq 'npm' }
+        }
+
+        It 'Never sets the non-existent Git key https.proxy, only removes stale copies of it' {
+            Mock Get-Command { return $null } -ParameterFilter { $Name -in @('scoop', 'npm', 'uv') }
+            Mock Get-Command { return [PSCustomObject]@{ Name = 'git' } } -ParameterFilter { $Name -eq 'git' }
+
+            Set-BmcToolProxy -ProxyUrl 'http://127.0.0.1:3128'
+
+            Should -Invoke Invoke-BmcCli -Times 0 -Exactly -ParameterFilter {
+                $Tool -eq 'git' -and ($Arguments -contains 'https.proxy') -and ($Arguments -notcontains '--unset')
+            }
+            Should -Invoke Invoke-BmcCli -Times 1 -Exactly -ParameterFilter {
+                $Tool -eq 'git' -and ($Arguments -join ' ') -eq 'config --global --unset https.proxy'
+            }
+        }
+
+        It 'Clears Scoop and Git proxy when invoked with an empty URL (Direct Access)' {
+            Mock Get-Command { return [PSCustomObject]@{ Name = 'scoop' } } -ParameterFilter { $Name -eq 'scoop' }
+            Mock Get-Command { return [PSCustomObject]@{ Name = 'git' } }   -ParameterFilter { $Name -eq 'git' }
+            Mock Get-Command { return $null } -ParameterFilter { $Name -eq 'npm' }
+            Mock Get-Command { return $null } -ParameterFilter { $Name -eq 'uv' }
+
+            Set-BmcToolProxy -ProxyUrl $null
+
+            Should -Invoke Invoke-BmcCli -Times 1 -Exactly -ParameterFilter {
+                $Tool -eq 'scoop' -and ($Arguments -join ' ') -eq 'config rm proxy'
+            }
+            Should -Invoke Invoke-BmcCli -Times 1 -Exactly -ParameterFilter {
+                $Tool -eq 'git' -and ($Arguments -join ' ') -eq 'config --global --unset http.proxy'
+            }
+        }
+
+        It 'Sets npm proxy and https-proxy when npm is available' {
+            Mock Get-Command { return $null } -ParameterFilter { $Name -in @('scoop', 'git', 'uv') }
+            Mock Get-Command { return [PSCustomObject]@{ Name = 'npm' } } -ParameterFilter { $Name -eq 'npm' }
+
+            Set-BmcToolProxy -ProxyUrl 'http://127.0.0.1:3128'
+
+            Should -Invoke Invoke-BmcCli -Times 1 -Exactly -ParameterFilter {
+                $Tool -eq 'npm' -and ($Arguments -join ' ') -eq 'config set proxy http://127.0.0.1:3128'
+            }
+            Should -Invoke Invoke-BmcCli -Times 1 -Exactly -ParameterFilter {
+                $Tool -eq 'npm' -and ($Arguments -join ' ') -eq 'config set https-proxy http://127.0.0.1:3128'
+            }
+        }
+
+        It 'Clears npm proxy settings in Direct Access' {
+            Mock Get-Command { return $null } -ParameterFilter { $Name -in @('scoop', 'git', 'uv') }
+            Mock Get-Command { return [PSCustomObject]@{ Name = 'npm' } } -ParameterFilter { $Name -eq 'npm' }
+
+            Set-BmcToolProxy -ProxyUrl ''
+
+            Should -Invoke Invoke-BmcCli -Times 1 -Exactly -ParameterFilter {
+                $Tool -eq 'npm' -and ($Arguments -join ' ') -eq 'config delete proxy'
+            }
+            Should -Invoke Invoke-BmcCli -Times 1 -Exactly -ParameterFilter {
+                $Tool -eq 'npm' -and ($Arguments -join ' ') -eq 'config delete https-proxy'
+            }
+        }
+
+        It 'Warns instead of reporting success when Scoop returns a non-zero exit code' {
+            Mock Get-Command { return $null } -ParameterFilter { $Name -in @('git', 'npm', 'uv') }
+            Mock Get-Command { return [PSCustomObject]@{ Name = 'scoop' } } -ParameterFilter { $Name -eq 'scoop' }
+            Mock Invoke-BmcCli { return 1 } -ParameterFilter { $Tool -eq 'scoop' }
+
+            Set-BmcToolProxy -ProxyUrl 'http://127.0.0.1:3128'
+
+            Should -Invoke Out-Warn -Times 1 -Exactly
+        }
+    }
+
+    Context 'Set-BmcNexusConfig' {
+        BeforeEach {
+            $script:cfg = Get-BmcTemplateConfig | ConvertTo-Json -Depth 6 | ConvertFrom-Json
+            Mock Get-Command { return $null } -ParameterFilter { $Name -eq 'npm' }
+        }
+
+        It 'Sets UV/PIP index variables when enabled' {
+            Set-BmcNexusConfig -Config $script:cfg -Enabled $true
+            [Environment]::GetEnvironmentVariable('UV_INDEX_URL', 'Process')  | Should -Be $script:cfg.nexus.pypiIndexUrl
+            [Environment]::GetEnvironmentVariable('PIP_INDEX_URL', 'Process') | Should -Be $script:cfg.nexus.pypiIndexUrl
+        }
+
+        It 'Clears UV/PIP index variables when disabled' {
+            [Environment]::SetEnvironmentVariable('UV_INDEX_URL', 'http://old', 'Process')
+            Set-BmcNexusConfig -Config $script:cfg -Enabled $false
+            [Environment]::GetEnvironmentVariable('UV_INDEX_URL', 'Process') | Should -BeNullOrEmpty
+        }
+    }
+
+    Context 'Set-BmcNexusConfig (npm registry)' {
+        BeforeEach {
+            $script:cfg = Get-BmcTemplateConfig | ConvertTo-Json -Depth 6 | ConvertFrom-Json
+            Mock Get-Command { return [PSCustomObject]@{ Name = 'npm' } } -ParameterFilter { $Name -eq 'npm' }
+            Mock Invoke-BmcCli { return 0 }
+        }
+
+        It 'Points npm at the Nexus registry when enabled' {
+            Set-BmcNexusConfig -Config $script:cfg -Enabled $true
+
+            Should -Invoke Invoke-BmcCli -Times 1 -Exactly -ParameterFilter {
+                $Tool -eq 'npm' -and
+                ($Arguments -join ' ') -eq 'config set registry https://nexus.corp.example.com/repository/npm-group/'
+            }
+        }
+
+        It 'Restores the default npm registry when disabled' {
+            Set-BmcNexusConfig -Config $script:cfg -Enabled $false
+
+            Should -Invoke Invoke-BmcCli -Times 1 -Exactly -ParameterFilter {
+                $Tool -eq 'npm' -and ($Arguments -join ' ') -eq 'config delete registry'
+            }
+        }
     }
 
     Context 'Get-BmcPacUrlFromRegistry' {
@@ -142,18 +375,16 @@ Describe 'BusterMyConnection (bmc) - Unit Test Suite' {
 
     Context 'State Management and Environment Variables (Simulated I/O)' {
         BeforeEach {
-            # Instead of relying on the Pester PSDrive resolution inside the functions (the source of the
-            # previous bug), we use the real physical TestDrive path via $TestDrive. That path is an
-            # ordinary filesystem directory, resolved identically by both the functions and the
-            # assertions, eliminating any divergence between the PSDrive view and the native provider.
             $script:testAppDataPath = Join-Path -Path $TestDrive -ChildPath 'bmc'
             $script:testStatePath   = Join-Path -Path $script:testAppDataPath -ChildPath 'state.json'
+
+            # Neutralize tool reconfiguration side effects in these focused I/O tests.
+            Mock Set-BmcToolProxy {}
         }
 
         It 'Enable-BmcDirectAccess removes process proxy variables and persists state' {
             [Environment]::SetEnvironmentVariable('HTTP_PROXY', 'http://127.0.0.1:3128', 'Process')
 
-            # Inject the test paths explicitly, with no dependence on global variable scope.
             Enable-BmcDirectAccess -AppDataPath $script:testAppDataPath -StatePath $script:testStatePath
 
             [Environment]::GetEnvironmentVariable('HTTP_PROXY', 'Process') | Should -BeNullOrEmpty
@@ -172,6 +403,13 @@ Describe 'BusterMyConnection (bmc) - Unit Test Suite' {
     }
 
     Context 'Main Orchestration Flow (Start-BmcOrchestration)' {
+        BeforeEach {
+            # Pin a deterministic scenario and neutralize tool/Nexus side effects by default.
+            Mock Get-BmcScenario { return 'Office' }
+            Mock Set-BmcNexusConfig {}
+            Mock Set-BmcToolProxy {}
+        }
+
         It 'Enables Direct Access when Registry does not contain PAC URL' {
             Mock Get-BmcPacUrlFromRegistry { return $null }
             Mock Enable-BmcDirectAccess {}
@@ -184,6 +422,16 @@ Describe 'BusterMyConnection (bmc) - Unit Test Suite' {
         It 'Enables Direct Access when PAC file is network unreachable' {
             Mock Get-BmcPacUrlFromRegistry { return 'http://pac.corp.local/proxy.pac' }
             Mock Test-BmcPacEndpoint { return $false }
+            Mock Enable-BmcDirectAccess {}
+
+            Start-BmcOrchestration -LocalPort 3128
+
+            Should -Invoke Enable-BmcDirectAccess -Exactly 1
+        }
+
+        It 'Enables Direct Access when the active scenario requests proxy=none (Home)' {
+            Mock Get-BmcScenario { return 'Home' }
+            Mock Get-BmcPacUrlFromRegistry { return 'http://pac.corp.local/proxy.pac' }
             Mock Enable-BmcDirectAccess {}
 
             Start-BmcOrchestration -LocalPort 3128

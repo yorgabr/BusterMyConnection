@@ -19,3 +19,7 @@ coverage.xml
 cover/**/out
 *.patch
 **/out
+*dump.txt
+*log.txt
+dist/
+reports/*
