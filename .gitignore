@@ -22,4 +22,4 @@ cover/**/out
 *dump.txt
 *log.txt
 dist/
-reports/*
+reports/*reports/
