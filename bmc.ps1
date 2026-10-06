@@ -51,7 +51,7 @@ param(
 )
 
 # Global Constants & Paths
-$SCRIPT_VERSION = '2.1.0'
+$SCRIPT_VERSION = '3.1.0'
 $BmcAppDataPath = Join-Path -Path $env:LOCALAPPDATA -ChildPath 'bmc'
 $StateFilePath   = Join-Path -Path $BmcAppDataPath -ChildPath 'state.json'
 $ConfigFilePath  = Join-Path -Path $BmcAppDataPath -ChildPath 'bmc.config.json'
