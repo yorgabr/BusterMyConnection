@@ -27,6 +27,9 @@
 .PARAMETER Port
     Specifies the local listening port for Px Proxy. Default is 3128.
 
+.PARAMETER SkipToolCheck
+    Skips the post-configuration access check of Git, Scoop, npm and uv.
+
 .PARAMETER ConfigPath
     Path to the bmc JSON configuration file. Defaults to %LOCALAPPDATA%\bmc\bmc.config.json.
     When absent, the built-in template config (Get-BmcTemplateConfig) is used.
@@ -43,11 +46,12 @@ param(
     [switch] $JustCheck,
     [switch] $DotSourceOnly,
     [int] $Port = 3128,
-    [string] $ConfigPath
+    [string] $ConfigPath,
+    [switch] $SkipToolCheck
 )
 
 # Global Constants & Paths
-$SCRIPT_VERSION = '2.0.0'
+$SCRIPT_VERSION = '2.1.0'
 $BmcAppDataPath = Join-Path -Path $env:LOCALAPPDATA -ChildPath 'bmc'
 $StateFilePath   = Join-Path -Path $BmcAppDataPath -ChildPath 'state.json'
 $ConfigFilePath  = Join-Path -Path $BmcAppDataPath -ChildPath 'bmc.config.json'
@@ -91,6 +95,7 @@ function Get-BmcTemplateConfig {
         detection = [ordered]@{
             vpnAdapterPattern      = 'F5|BIG-IP'
             officeDnsSuffixPattern = '(^|\.)corp\.example\.com$'
+            pacProbe               = $true
         }
         scenarios = [ordered]@{
             Office = [ordered]@{ proxy = 'auto'; nexus = $true }
@@ -108,6 +113,10 @@ function Get-BmcTemplateConfig {
         }
         git = [ordered]@{
             useCurrentUserCredentials = $true
+        }
+        probes = [ordered]@{
+            git   = 'https://github.com/octocat/Hello-World.git'
+            scoop = 'https://github.com'
         }
         tools = @('Git', 'Scoop', 'Uv', 'Npm', 'Environment')
     }
@@ -145,11 +154,19 @@ function Get-BmcScenario {
         Determines the active network scenario using the detection patterns in the config:
         - 'Vpn'    when an active network adapter matches detection.vpnAdapterPattern.
         - 'Office' when a connection-specific DNS suffix matches detection.officeDnsSuffixPattern.
+        - 'Office' when no pattern matched but the corporate PAC endpoint (from the registry) is
+          reachable without any proxy: that server is only reachable from inside the corporate
+          network, so reaching it is strong evidence of being on it. Disable it with
+          detection.pacProbe = false.
         - 'Home'   otherwise.
+    .PARAMETER PacUrl
+        PAC URL found in the registry. Optional; enables the reachability-based Office detection.
     #>
     param(
         [Parameter(Mandatory = $true)]
-        $Config
+        $Config,
+
+        [string] $PacUrl
     )
 
     $vpnPattern    = $Config.detection.vpnAdapterPattern
@@ -173,6 +190,9 @@ function Get-BmcScenario {
 
     # 2. Office detection: inspect connection-specific DNS suffixes.
     if ($officePattern) {
+        if ($officePattern -match 'example') {
+            Out-Warn "detection.officeDnsSuffixPattern still holds the template placeholder ($officePattern); it cannot match your network. Set the real DNS suffix in your bmc config."
+        }
         try {
             $suffixes = (Get-DnsClient -ErrorAction SilentlyContinue).ConnectionSpecificSuffix |
                 Where-Object { $_ }
@@ -184,6 +204,14 @@ function Get-BmcScenario {
         }
         catch {
             Out-Warn "Office DNS suffix detection failed: $_"
+        }
+    }
+
+    # 3. Office detection by PAC reachability (works even when no DNS suffix pattern is configured).
+    if ($PacUrl -and ($Config.detection.pacProbe -ne $false)) {
+        if (Test-BmcPacEndpoint -PacUrl $PacUrl -TimeoutSeconds 3) {
+            Out-Info "Corporate PAC endpoint is reachable without proxy: assuming the corporate network."
+            return 'Office'
         }
     }
 
@@ -450,6 +478,77 @@ function Install-BmcPxProxy {
 }
 
 # Health Checks
+function Test-BmcHttpAccess {
+    <#
+    .SYNOPSIS
+        HEAD request that reports whether a URL answers, optionally through a proxy.
+    .DESCRIPTION
+        Any HTTP answer counts as network reachability (a server that replies 404/405 to HEAD is
+        reachable), except 407 and 502/503/504, which indicate a proxy or upstream failure.
+        Without -ProxyUrl the request goes direct (no system/PAC proxy), so it measures what the
+        local network itself can reach. Returns Success, Detail and ElapsedMs.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $Url,
+
+        [string] $ProxyUrl,
+
+        [int] $TimeoutSeconds = 10
+    )
+
+    $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+    $success = $false
+    $detail  = ''
+
+    try {
+        # .NET Framework behind Windows PowerShell 5.1 may default to legacy TLS versions.
+        [System.Net.ServicePointManager]::SecurityProtocol =
+            [System.Net.ServicePointManager]::SecurityProtocol -bor [System.Net.SecurityProtocolType]::Tls12
+
+        $request = [System.Net.WebRequest]::Create($Url)
+        $request.Timeout = $TimeoutSeconds * 1000
+        $request.Method = 'HEAD'
+        if ($ProxyUrl) {
+            $webProxy = New-Object System.Net.WebProxy($ProxyUrl, $false)
+            $webProxy.UseDefaultCredentials = $true
+            $request.Proxy = $webProxy
+        } else {
+            $request.Proxy = $null
+        }
+
+        $response = $request.GetResponse()
+        $detail = "HTTP $([int]$response.StatusCode)"
+        $response.Close()
+        $success = $true
+    }
+    catch [System.Net.WebException] {
+        $webResponse = $_.Exception.Response
+        if ($webResponse) {
+            $statusCode = [int]$webResponse.StatusCode
+            $webResponse.Close()
+            if ($statusCode -in 407, 502, 503, 504) {
+                $detail = "HTTP $statusCode (proxy or upstream failure)"
+            } else {
+                $success = $true
+                $detail = "HTTP $statusCode"
+            }
+        } else {
+            $detail = $_.Exception.Message
+        }
+    }
+    catch {
+        $detail = $_.Exception.Message
+    }
+
+    $stopwatch.Stop()
+    return [PSCustomObject]@{
+        Success   = $success
+        Detail    = $detail
+        ElapsedMs = $stopwatch.ElapsedMilliseconds
+    }
+}
+
 function Test-BmcPacEndpoint {
     param(
         [Parameter(Mandatory = $true)]
@@ -458,17 +557,137 @@ function Test-BmcPacEndpoint {
         [int] $TimeoutSeconds = 5
     )
 
+    return [bool](Test-BmcHttpAccess -Url $PacUrl -TimeoutSeconds $TimeoutSeconds).Success
+}
+
+function Test-BmcToolAccess {
+    <#
+    .SYNOPSIS
+        Verifies, after the environment was configured for the scenario, that each tool can really
+        reach its network target. Reports per tool and returns the result objects.
+    .DESCRIPTION
+        - Git : git ls-remote against probes.git (uses the global http.proxy just configured).
+        - npm : npm ping against the active registry (Nexus when enabled, public otherwise).
+        - uv  : HTTP probe of the active PyPI index. uv has no ping command; it honours the
+                HTTP(S)_PROXY process variables, which the probe reproduces with -ProxyUrl.
+        - Scoop: HTTP probe of probes.scoop through the same proxy Scoop is configured with
+                (Scoop has no connectivity command and `scoop update` would change state).
+        Read-only: nothing is installed or modified.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]
+        $Config,
+
+        [string] $ProxyUrl,
+
+        [bool] $NexusEnabled = $false,
+
+        [int] $TimeoutSeconds = 15
+    )
+
+    $route = if ($ProxyUrl) { "via $ProxyUrl" } else { 'direct' }
+
+    $pypiTarget = if ($Config.proxy.probeUrl) { $Config.proxy.probeUrl } else { 'https://pypi.org' }
+    $npmTarget  = 'https://registry.npmjs.org/'
+    if ($NexusEnabled) {
+        if ($Config.nexus.pypiIndexUrl)   { $pypiTarget = $Config.nexus.pypiIndexUrl }
+        if ($Config.nexus.npmRegistryUrl) { $npmTarget  = $Config.nexus.npmRegistryUrl }
+    }
+    $gitTarget   = if ($Config.probes.git)   { $Config.probes.git }   else { 'https://github.com/octocat/Hello-World.git' }
+    $scoopTarget = if ($Config.probes.scoop) { $Config.probes.scoop } else { 'https://github.com' }
+
+    $newResult = {
+        param($Tool, $Target, $Success, $Detail, $ElapsedMs)
+        [PSCustomObject]@{ Tool = $Tool; Target = $Target; Success = [bool]$Success; Detail = $Detail; ElapsedMs = $ElapsedMs }
+    }
+    $results = New-Object System.Collections.Generic.List[object]
+
+    Out-Info "Checking tool access ($route)..."
+
+    # --- Git ---
+    if (Get-Command -Name 'git' -ErrorAction SilentlyContinue) {
+        $previousPrompt = $env:GIT_TERMINAL_PROMPT
+        $env:GIT_TERMINAL_PROMPT = '0'   # never block waiting for credentials
+        $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+        try {
+            $exitCode = Invoke-BmcCli -Tool 'git' -Arguments @(
+                '-c', 'http.lowSpeedLimit=1', '-c', "http.lowSpeedTime=$TimeoutSeconds",
+                'ls-remote', '--exit-code', $gitTarget, 'HEAD')
+            $detail = "exit code $exitCode"
+        }
+        catch {
+            $exitCode = -1
+            $detail = "$_"
+        }
+        finally {
+            $env:GIT_TERMINAL_PROMPT = $previousPrompt
+        }
+        $results.Add((& $newResult 'Git' $gitTarget ($exitCode -eq 0) $detail $stopwatch.ElapsedMilliseconds))
+    }
+
+    # --- npm ---
+    if (Get-Command -Name 'npm' -ErrorAction SilentlyContinue) {
+        $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+        try {
+            $exitCode = Invoke-BmcCli -Tool 'npm' -Arguments @(
+                'ping', '--registry', $npmTarget, '--fetch-retries=0', "--fetch-timeout=$($TimeoutSeconds * 1000)")
+            $detail = "exit code $exitCode"
+        }
+        catch {
+            $exitCode = -1
+            $detail = "$_"
+        }
+        $results.Add((& $newResult 'npm' $npmTarget ($exitCode -eq 0) $detail $stopwatch.ElapsedMilliseconds))
+    }
+
+    # --- uv ---
+    if (Get-Command -Name 'uv' -ErrorAction SilentlyContinue) {
+        $probe = Test-BmcHttpAccess -Url $pypiTarget -ProxyUrl $ProxyUrl -TimeoutSeconds $TimeoutSeconds
+        $results.Add((& $newResult 'uv' $pypiTarget $probe.Success "$($probe.Detail) [HTTP probe]" $probe.ElapsedMs))
+    }
+
+    # --- Scoop ---
+    if (Get-Command -Name 'scoop' -ErrorAction SilentlyContinue) {
+        $probe = Test-BmcHttpAccess -Url $scoopTarget -ProxyUrl $ProxyUrl -TimeoutSeconds $TimeoutSeconds
+        $results.Add((& $newResult 'Scoop' $scoopTarget $probe.Success "$($probe.Detail) [HTTP probe]" $probe.ElapsedMs))
+    }
+
+    foreach ($result in $results) {
+        $line = "{0,-5} {1} - {2} ({3} ms)" -f $result.Tool, $result.Target, $result.Detail, $result.ElapsedMs
+        if ($result.Success) { Out-Succ $line } else { Out-Warn $line }
+    }
+
+    $failed = @($results | Where-Object { -not $_.Success })
+    if ($results.Count -eq 0) {
+        Out-Warn "No supported tool (git, npm, uv, scoop) found to check."
+    } elseif ($failed.Count -eq 0) {
+        Out-Succ "All $($results.Count) tool(s) can reach their targets ($route)."
+    } else {
+        Out-Warn "$($failed.Count) of $($results.Count) tool(s) cannot reach their targets ($route): $(($failed | ForEach-Object { $_.Tool }) -join ', ')."
+    }
+
+    return $results.ToArray()
+}
+
+function Get-BmcNetworkEvidence {
+    <#
+    .SYNOPSIS
+        Lists the signals the scenario detection looks at (active adapters, DNS suffixes), so the
+        detection patterns in the bmc config can be written from real data.
+    #>
+    $adapters = @()
+    $suffixes = @()
     try {
-        $request = [System.Net.WebRequest]::Create($PacUrl)
-        $request.Timeout = $TimeoutSeconds * 1000
-        $request.Method = 'HEAD'
-        $response = $request.GetResponse()
-        $response.Close()
-        return $true
+        $adapters = @(Get-NetAdapter -ErrorAction SilentlyContinue |
+            Where-Object { $_.Status -eq 'Up' } |
+            ForEach-Object { '{0} ({1})' -f $_.Name, $_.InterfaceDescription })
+        $suffixes = @((Get-DnsClient -ErrorAction SilentlyContinue).ConnectionSpecificSuffix |
+            Where-Object { $_ } | Sort-Object -Unique)
     }
     catch {
-        return $false
+        Out-Warn "Network evidence collection failed: $_"
     }
+    return [PSCustomObject]@{ Adapters = $adapters; DnsSuffixes = $suffixes }
 }
 
 function Get-BmcRunningPxProcess {
@@ -597,10 +816,14 @@ function Invoke-BmcDiagnosticCheck {
     Out-Info "--- BusterMyConnection v$SCRIPT_VERSION [Diagnostic Check Mode] ---"
 
     $config   = Get-BmcConfig
-    $scenario = Get-BmcScenario -Config $config
+    $pacUrl   = Get-BmcPacUrlFromRegistry
+    $scenario = Get-BmcScenario -Config $config -PacUrl $pacUrl
     Out-Info "Detected network scenario: $scenario"
 
-    $pacUrl = Get-BmcPacUrlFromRegistry
+    $evidence = Get-BmcNetworkEvidence
+    Out-Info "Active adapters: $($evidence.Adapters -join '; ')"
+    Out-Info "DNS suffixes: $($evidence.DnsSuffixes -join ', ')"
+
     if ($pacUrl) {
         Out-Succ "PAC File URL located in Registry: $pacUrl"
         $pacReachable = Test-BmcPacEndpoint -PacUrl $pacUrl
@@ -640,7 +863,8 @@ function Start-BmcOrchestration {
     [CmdletBinding(SupportsShouldProcess = $true)]
     param(
         [int] $LocalPort = 3128,
-        [string] $ConfigPath = $ConfigFilePath
+        [string] $ConfigPath = $ConfigFilePath,
+        [switch] $SkipToolCheck
     )
 
     if (-not $PSCmdlet.ShouldProcess("Local System", "Orchestrate Px Proxy and environment state")) {
@@ -649,18 +873,27 @@ function Start-BmcOrchestration {
 
     Out-Info "--- BusterMyConnection v$SCRIPT_VERSION ---"
 
-    # 0. Load configuration and resolve the active network scenario.
+    # 0. Load configuration, read the PAC URL and resolve the active network scenario.
     $config   = Get-BmcConfig -Path $ConfigPath
-    $scenario = Get-BmcScenario -Config $config
+    $pacUrl   = Get-BmcPacUrlFromRegistry
+    $scenario = Get-BmcScenario -Config $config -PacUrl $pacUrl
     Out-Info "Detected network scenario: $scenario"
     $scenarioConfig = $config.scenarios.$scenario
 
-    # 1. Retrieve Corporate PAC File from Windows Registry
-    $pacUrl = Get-BmcPacUrlFromRegistry
+    # Verifies every tool once the environment is configured (read-only; see Test-BmcToolAccess).
+    $checkTools = {
+        param([string] $EffectiveProxy, [bool] $NexusOn)
+        if (-not $SkipToolCheck) {
+            $null = Test-BmcToolAccess -Config $config -ProxyUrl $EffectiveProxy -NexusEnabled $NexusOn
+        }
+    }
+
+    # 1. Corporate PAC File from the Windows Registry
     if (-not $pacUrl) {
         Out-Warn "No corporate PAC file detected in Windows Registry."
         Enable-BmcDirectAccess
         Set-BmcNexusConfig -Config $config -Enabled $false
+        & $checkTools '' $false
         return
     }
 
@@ -669,8 +902,13 @@ function Start-BmcOrchestration {
     # Home-like scenarios explicitly request direct access regardless of PAC presence.
     if ($scenarioConfig -and $scenarioConfig.proxy -eq 'none') {
         Out-Info "Scenario '$scenario' requests direct access (proxy=none)."
+        if ($scenario -eq 'Home') {
+            Out-Warn "A corporate PAC file is configured but the corporate network was not detected. If you are on it, set detection.officeDnsSuffixPattern in $ConfigFilePath (run bmc -JustCheck to list the DNS suffixes and adapters seen)."
+        }
         Enable-BmcDirectAccess
-        Set-BmcNexusConfig -Config $config -Enabled ([bool]$scenarioConfig.nexus)
+        $nexusOn = [bool]$scenarioConfig.nexus
+        Set-BmcNexusConfig -Config $config -Enabled $nexusOn
+        & $checkTools '' $nexusOn
         return
     }
 
@@ -680,6 +918,7 @@ function Start-BmcOrchestration {
         Out-Warn "PAC file endpoint is unreachable. Corporate proxy might be unavailable."
         Enable-BmcDirectAccess
         Set-BmcNexusConfig -Config $config -Enabled $false
+        & $checkTools '' $false
         return
     }
 
@@ -699,6 +938,7 @@ function Start-BmcOrchestration {
             Out-Err "Failed to start Px Proxy."
             Enable-BmcDirectAccess
             Set-BmcNexusConfig -Config $config -Enabled $false
+            & $checkTools '' $false
             return
         }
     }
@@ -711,6 +951,9 @@ function Start-BmcOrchestration {
     # 6. Reconfigure Nexus mirrors according to the active scenario.
     $nexusEnabled = if ($scenarioConfig) { [bool]$scenarioConfig.nexus } else { $false }
     Set-BmcNexusConfig -Config $config -Enabled $nexusEnabled
+
+    # 7. Verify that every tool reaches its target through the configured route.
+    & $checkTools "http://127.0.0.1:$LocalPort" $nexusEnabled
 }
 
 # --- DotSource Guard ---
@@ -723,11 +966,11 @@ if ($JustCheck) {
     Invoke-BmcDiagnosticCheck -TargetPort $Port
 } else {
     try {
+        $orchestrationArgs = @{ LocalPort = $Port; SkipToolCheck = $SkipToolCheck.IsPresent }
         if ($ConfigPath) {
-            Start-BmcOrchestration -LocalPort $Port -ConfigPath $ConfigPath
-        } else {
-            Start-BmcOrchestration -LocalPort $Port
+            $orchestrationArgs['ConfigPath'] = $ConfigPath
         }
+        Start-BmcOrchestration @orchestrationArgs
     }
     catch {
         Out-Err "A critical error occurred during orchestration: $_"

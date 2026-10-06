@@ -90,6 +90,120 @@ Describe 'BusterMyConnection (bmc) - Unit Test Suite' {
 
             Get-BmcScenario -Config $script:cfg | Should -Be 'Home'
         }
+
+        It 'Returns Office when no pattern matches but the PAC endpoint is reachable without proxy' {
+            Mock Get-NetAdapter { return @() }
+            Mock Get-DnsClient { return @([PSCustomObject]@{ ConnectionSpecificSuffix = 'lan' }) }
+            Mock Test-BmcPacEndpoint { return $true }
+
+            Get-BmcScenario -Config $script:cfg -PacUrl 'http://pac.corp.local/proxy.pac' | Should -Be 'Office'
+        }
+
+        It 'Returns Home when the PAC endpoint is unreachable' {
+            Mock Get-NetAdapter { return @() }
+            Mock Get-DnsClient { return @() }
+            Mock Test-BmcPacEndpoint { return $false }
+
+            Get-BmcScenario -Config $script:cfg -PacUrl 'http://pac.corp.local/proxy.pac' | Should -Be 'Home'
+        }
+
+        It 'Does not probe the PAC endpoint when detection.pacProbe is false' {
+            Mock Get-NetAdapter { return @() }
+            Mock Get-DnsClient { return @() }
+            Mock Test-BmcPacEndpoint { return $true }
+            $script:cfg.detection.pacProbe = $false
+
+            Get-BmcScenario -Config $script:cfg -PacUrl 'http://pac.corp.local/proxy.pac' | Should -Be 'Home'
+            Should -Invoke Test-BmcPacEndpoint -Times 0 -Exactly
+        }
+
+        It 'Prefers Vpn over PAC reachability' {
+            Mock Get-NetAdapter {
+                return @([PSCustomObject]@{ Status = 'Up'; Name = 'F5 VPN'; InterfaceDescription = 'F5 Networks Virtual Adapter' })
+            }
+            Mock Test-BmcPacEndpoint { return $true }
+
+            Get-BmcScenario -Config $script:cfg -PacUrl 'http://pac.corp.local/proxy.pac' | Should -Be 'Vpn'
+            Should -Invoke Test-BmcPacEndpoint -Times 0 -Exactly
+        }
+
+        It 'Warns when the Office DNS pattern is still the template placeholder' {
+            Mock Get-NetAdapter { return @() }
+            Mock Get-DnsClient { return @() }
+
+            $null = Get-BmcScenario -Config $script:cfg
+            Should -Invoke Out-Warn -Times 1 -Exactly
+        }
+    }
+
+    Context 'Test-BmcHttpAccess' {
+        It 'Reports failure with a detail message when the endpoint refuses the connection' {
+            $result = Test-BmcHttpAccess -Url 'http://127.0.0.1:65534/' -TimeoutSeconds 1
+            $result.Success | Should -Be $false
+            $result.Detail  | Should -Not -BeNullOrEmpty
+        }
+    }
+
+    Context 'Test-BmcToolAccess' {
+        BeforeEach {
+            $script:cfg = Get-BmcTemplateConfig | ConvertTo-Json -Depth 6 | ConvertFrom-Json
+            Mock Get-Command { return [PSCustomObject]@{ Name = $Name } } -ParameterFilter { $Name -in @('git', 'npm', 'uv', 'scoop') }
+            Mock Invoke-BmcCli { return 0 }
+            Mock Test-BmcHttpAccess { return [PSCustomObject]@{ Success = $true; Detail = 'HTTP 200'; ElapsedMs = 5 } }
+        }
+
+        It 'Checks every available tool through the proxy against the public targets when Nexus is off' {
+            $results = Test-BmcToolAccess -Config $script:cfg -ProxyUrl 'http://127.0.0.1:3128' -NexusEnabled $false
+
+            @($results).Count | Should -Be 4
+            @($results | Where-Object { -not $_.Success }).Count | Should -Be 0
+            Should -Invoke Invoke-BmcCli -Times 1 -Exactly -ParameterFilter {
+                $Tool -eq 'git' -and $Arguments -contains 'ls-remote' -and $Arguments -contains 'https://github.com/octocat/Hello-World.git'
+            }
+            Should -Invoke Invoke-BmcCli -Times 1 -Exactly -ParameterFilter {
+                $Tool -eq 'npm' -and $Arguments[0] -eq 'ping' -and $Arguments -contains 'https://registry.npmjs.org/'
+            }
+            Should -Invoke Test-BmcHttpAccess -Times 1 -Exactly -ParameterFilter {
+                $Url -eq 'https://pypi.org' -and $ProxyUrl -eq 'http://127.0.0.1:3128'
+            }
+            Should -Invoke Test-BmcHttpAccess -Times 1 -Exactly -ParameterFilter {
+                $Url -eq 'https://github.com' -and $ProxyUrl -eq 'http://127.0.0.1:3128'
+            }
+        }
+
+        It 'Targets the Nexus mirrors when Nexus is enabled' {
+            $null = Test-BmcToolAccess -Config $script:cfg -ProxyUrl 'http://127.0.0.1:3128' -NexusEnabled $true
+
+            Should -Invoke Invoke-BmcCli -Times 1 -Exactly -ParameterFilter {
+                $Tool -eq 'npm' -and $Arguments -contains 'https://nexus.corp.example.com/repository/npm-group/'
+            }
+            Should -Invoke Test-BmcHttpAccess -Times 1 -Exactly -ParameterFilter {
+                $Url -eq 'https://nexus.corp.example.com/repository/pypi-group/simple'
+            }
+        }
+
+        It 'Probes without proxy in Direct Access' {
+            $null = Test-BmcToolAccess -Config $script:cfg -ProxyUrl '' -NexusEnabled $false
+
+            Should -Invoke Test-BmcHttpAccess -Times 2 -Exactly -ParameterFilter { -not $ProxyUrl }
+        }
+
+        It 'Reports the failing tool and warns' {
+            Mock Invoke-BmcCli { return 128 } -ParameterFilter { $Tool -eq 'git' }
+
+            $results = Test-BmcToolAccess -Config $script:cfg -ProxyUrl 'http://127.0.0.1:3128'
+
+            @($results | Where-Object { -not $_.Success }).Tool | Should -Be 'Git'
+            Should -Invoke Out-Warn -Times 2 -Exactly   # the Git line and the summary
+        }
+
+        It 'Warns when no supported tool is installed' {
+            Mock Get-Command { return $null } -ParameterFilter { $Name -in @('git', 'npm', 'uv', 'scoop') }
+
+            $results = Test-BmcToolAccess -Config $script:cfg
+            @($results).Count | Should -Be 0
+            Should -Invoke Out-Warn -Times 1 -Exactly
+        }
     }
 
     Context 'Invoke-BmcCli' {
@@ -408,6 +522,7 @@ Describe 'BusterMyConnection (bmc) - Unit Test Suite' {
             Mock Get-BmcScenario { return 'Office' }
             Mock Set-BmcNexusConfig {}
             Mock Set-BmcToolProxy {}
+            Mock Test-BmcToolAccess { return @() }
         }
 
         It 'Enables Direct Access when Registry does not contain PAC URL' {
@@ -464,6 +579,48 @@ Describe 'BusterMyConnection (bmc) - Unit Test Suite' {
                 $ArgumentList -contains '--port=3128'
             }
             Should -Invoke Restore-BmcProxyEnvironment -Exactly 1
+        }
+
+        It 'Checks tool access through the local proxy after configuring the environment' {
+            Mock Get-BmcPacUrlFromRegistry { return 'http://pac.corp.local/proxy.pac' }
+            Mock Test-BmcPacEndpoint { return $true }
+            Mock Install-BmcPxProxy { return 'C:\scoop\apps\px\current\px.exe' }
+            Mock Get-BmcRunningPxProcess { return [PSCustomObject]@{ Id = 1010 } }
+            Mock Restore-BmcProxyEnvironment {}
+
+            Start-BmcOrchestration -LocalPort 3128
+
+            Should -Invoke Test-BmcToolAccess -Times 1 -Exactly -ParameterFilter {
+                $ProxyUrl -eq 'http://127.0.0.1:3128' -and $NexusEnabled -eq $true
+            }
+        }
+
+        It 'Checks tool access without proxy after enabling Direct Access' {
+            Mock Get-BmcPacUrlFromRegistry { return $null }
+            Mock Enable-BmcDirectAccess {}
+
+            Start-BmcOrchestration -LocalPort 3128
+
+            Should -Invoke Test-BmcToolAccess -Times 1 -Exactly -ParameterFilter { -not $ProxyUrl }
+        }
+
+        It 'Skips the tool access check when -SkipToolCheck is set' {
+            Mock Get-BmcPacUrlFromRegistry { return $null }
+            Mock Enable-BmcDirectAccess {}
+
+            Start-BmcOrchestration -LocalPort 3128 -SkipToolCheck
+
+            Should -Invoke Test-BmcToolAccess -Times 0 -Exactly
+        }
+
+        It 'Passes the PAC URL to the scenario detection' {
+            Mock Get-BmcPacUrlFromRegistry { return 'http://pac.corp.local/proxy.pac' }
+            Mock Test-BmcPacEndpoint { return $false }
+            Mock Enable-BmcDirectAccess {}
+
+            Start-BmcOrchestration -LocalPort 3128
+
+            Should -Invoke Get-BmcScenario -Times 1 -Exactly -ParameterFilter { $PacUrl -eq 'http://pac.corp.local/proxy.pac' }
         }
     }
 }
