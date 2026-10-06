@@ -10,15 +10,28 @@
     - Analyze: Performs AST syntax validation and PSScriptAnalyzer checks with PowerShell 5.1 compatibility.
     - Test: Runs Pester 5 test suite and validates code coverage target.
     - Build: Prepares distribution artifacts, config schema template, and SHA-256 hash.
-    - Install: Deploys the application locally to %LOCALAPPDATA% with a launcher wrapper.
+    - Install: Deploys bmc to the current user's PowerShell scripts folder (no administrator rights),
+      the same location Install-Script -Scope CurrentUser uses, and puts it on the user PATH.
+    - Uninstall: Removes what Install deployed (user PATH entry, config and state are left untouched).
+
+.PARAMETER CoverageTarget
+    Minimum code coverage percentage required by the Test task.
+
+.PARAMETER InstallPath
+    Folder that receives bmc.ps1 and the bmc.cmd launcher. Defaults to the PowerShellGet
+    CurrentUser scripts folder, <Documents>\WindowsPowerShell\Scripts. Documents is resolved through
+    the shell folder API because it is commonly redirected (OneDrive, roaming profile, GPO).
 #>
 
 # Suppress false-positive PSScriptAnalyzer findings for Invoke-Build DSL keywords
 [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingCmdletAliases', '')]
 [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSReviewUnusedParameter', 'CoverageTarget')]
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSReviewUnusedParameter', 'InstallPath')]
 param(
     [ValidateRange(0, 100)]
-    [int] $CoverageTarget = 60
+    [int] $CoverageTarget = 60,
+
+    [string] $InstallPath = (Join-Path -Path ([Environment]::GetFolderPath('MyDocuments')) -ChildPath 'WindowsPowerShell\Scripts')
 )
 
 # Global project path configurations relative to the build root
@@ -29,9 +42,12 @@ $Dist         = Join-Path -Path $BuildRoot -ChildPath 'dist'
 $Reports      = Join-Path -Path $BuildRoot -ChildPath 'reports'
 $VendorPath   = Join-Path -Path $BuildRoot -ChildPath 'vendor'
 
+# Per-user data folder owned by bmc itself (config and state); must match $BmcAppDataPath in bmc.ps1
+$BmcDataPath  = Join-Path -Path $env:LOCALAPPDATA -ChildPath 'bmc'
+
 <#
     Dependency resolution mechanism (vendoring):
-    Imports modules prioritizing local vendored paths (.\vendor\$
+    Imports modules prioritizing local vendored paths (.\vendor\<Name>\<Version>\)
     before falling back to globally installed modules meeting the minimum version requirement.
 #>
 function Import-VendoredModule {
@@ -77,6 +93,64 @@ function Import-VendoredModule {
     }
 
     Import-Module -Name $installed.Path -Force -ErrorAction Stop
+}
+
+<#
+    Adds a directory to the *user* PATH (HKCU\Environment) and to the current process.
+    Returns $true when the entry was added, $false when it was already present.
+
+    Why the registry instead of [Environment]::SetEnvironmentVariable('Path', ..., 'User'):
+    the .NET call hands back the already-expanded value and writes it as REG_SZ, which silently
+    replaces entries such as %USERPROFILE%\bin with literal paths. Reading the raw value and writing
+    it back as REG_EXPAND_SZ preserves them.
+#>
+function Add-UserPathEntry {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $Directory
+    )
+
+    $wanted  = $Directory.TrimEnd('\')
+    $key     = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)
+    $added   = $false
+
+    try {
+        $raw     = [string]$key.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+        $entries = @($raw -split ';' | Where-Object { $_ })
+
+        $present = $false
+        foreach ($entry in $entries) {
+            # -eq is case-insensitive, matching how Windows compares paths
+            if ([Environment]::ExpandEnvironmentVariables($entry).TrimEnd('\') -eq $wanted) {
+                $present = $true
+                break
+            }
+        }
+
+        if (-not $present) {
+            $newValue = (@($entries) + $Directory) -join ';'
+            $key.SetValue('Path', $newValue, [Microsoft.Win32.RegistryValueKind]::ExpandString)
+            $added = $true
+        }
+    }
+    finally {
+        $key.Close()
+    }
+
+    if ($added) {
+        # Writing the registry directly does not notify running programs. Setting and clearing a
+        # throwaway user variable makes .NET broadcast WM_SETTINGCHANGE so new shells see the change.
+        [Environment]::SetEnvironmentVariable('BMC_PATH_REFRESH', '1', 'User')
+        [Environment]::SetEnvironmentVariable('BMC_PATH_REFRESH', $null, 'User')
+    }
+
+    # Make the command available in the current session as well
+    $inProcess = @($env:Path -split ';' | ForEach-Object { $_.TrimEnd('\') }) -contains $wanted
+    if (-not $inProcess) {
+        $env:Path = "$env:Path;$Directory"
+    }
+
+    return $added
 }
 
 # Clean build artifacts and reports
@@ -174,48 +248,65 @@ task Build {
     Write-Build Green "Staged artifacts in $Dist (SHA-256: $hash)"
 }
 
-# Deploy local package following Scoop directory structure and native shim generation
+<#
+    Per-user installation following Windows PowerShell 5.1 conventions (no administrator rights):
+    - bmc.ps1 goes to <Documents>\WindowsPowerShell\Scripts, the folder Install-Script
+      -Scope CurrentUser uses, so `bmc` runs by name from any PowerShell session once the folder is
+      on the user PATH.
+    - bmc.cmd is a launcher for cmd.exe and for machines whose execution policy blocks .ps1 files.
+      It resolves bmc.ps1 relative to itself, so the folder can be relocated.
+    - Configuration and state stay in %LOCALAPPDATA%\bmc, owned by bmc.ps1; only the sample config
+      is refreshed there. An existing bmc.config.json is never touched.
+#>
 task Install Build, {
-    # Resolve Scoop base directory from environment or standard user location
-    $scoopDir = if ($env:SCOOP) { $env:SCOOP } else { Join-Path -Path $env:USERPROFILE -ChildPath 'scoop' }
-    $appDir   = Join-Path -Path $scoopDir -ChildPath 'apps\bmc\current'
-    $shimsDir = Join-Path -Path $scoopDir -ChildPath 'shims'
+    $null = New-Item -ItemType Directory -Path $InstallPath -Force
+    $null = New-Item -ItemType Directory -Path $BmcDataPath -Force
 
-    # Ensure required Scoop directories exist
-    $null = New-Item -ItemType Directory -Path $appDir -Force
-    $null = New-Item -ItemType Directory -Path $shimsDir -Force
+    # 1. Deploy the script and verify it against the hash produced by the Build task
+    $installedScript = Join-Path -Path $InstallPath -ChildPath 'bmc.ps1'
+    Copy-Item -LiteralPath (Join-Path -Path $Dist -ChildPath 'bmc.ps1') -Destination $installedScript -Force
 
-    # Copy distribution artifacts to current app version folder
-    $distFiles = Join-Path -Path $Dist -ChildPath '*'
-    Copy-Item -Path $distFiles -Destination $appDir -Force
+    $hashLine = Get-Content -LiteralPath (Join-Path -Path $Dist -ChildPath 'bmc.ps1.sha256') -TotalCount 1
+    $expected = ($hashLine -split '\s+')[0]
+    $actual   = (Get-FileHash -LiteralPath $installedScript -Algorithm SHA256).Hash
+    assert ($actual -eq $expected) "Integrity check failed for $installedScript (expected $expected, got $actual)."
 
-    # Target script path inside Scoop directory structure
-    $targetScript = Join-Path -Path $appDir -ChildPath 'bmc.ps1'
+    # 2. Launcher for cmd.exe. RemoteSigned applies to this process only and still honours Group Policy.
+    $launcherPath = Join-Path -Path $InstallPath -ChildPath 'bmc.cmd'
+    $launcher = "@echo off`r`n" +
+        "powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File `"%~dp0bmc.ps1`" %*`r`n" +
+        "exit /b %ERRORLEVEL%`r`n"
+    [System.IO.File]::WriteAllText($launcherPath, $launcher, [System.Text.Encoding]::ASCII)
 
-    # Scoop Shim Artifacts
-    $scoopShimBinary = Join-Path -Path $shimsDir -ChildPath 'shim.exe'
-    $bmcShimBinary   = Join-Path -Path $shimsDir -ChildPath 'bmc.exe'
-    $bmcShimConfig   = Join-Path -Path $shimsDir -ChildPath 'bmc.shim'
+    # 3. Refresh the sample config next to the user's real config
+    Copy-Item -LiteralPath (Join-Path -Path $Dist -ChildPath 'bmc.config.sample.json') -Destination $BmcDataPath -Force
 
-    if (Test-Path -LiteralPath $scoopShimBinary) {
-        # Standard Scoop Shim generation: copy shim.exe binary and write matching .shim configuration file
-        Copy-Item -LiteralPath $scoopShimBinary -Destination $bmcShimBinary -Force
-
-        # Define path to binary/script and optional arguments for the shim executor
-        $shimContent = "path = `"$targetScript`"`r`nargs = `"`""
-        [System.IO.File]::WriteAllText($bmcShimConfig, $shimContent, [System.Text.Encoding]::UTF8)
-
-        Write-Build Green "Scoop shim successfully created: $bmcShimBinary -> $targetScript"
+    # 4. Make `bmc` resolvable by name
+    if (Add-UserPathEntry -Directory $InstallPath) {
+        Write-Build Green "Added $InstallPath to the user PATH. Open a new terminal for other sessions to pick it up."
     } else {
-        # Fallback script shim generation when Scoop is not installed in the environment
-        $cmdShim = Join-Path -Path $shimsDir -ChildPath 'bmc.cmd'
-        $launcher = "@echo off`r`npowershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$targetScript`" %*`r`n"
-        [System.IO.File]::WriteAllText($cmdShim, $launcher, [System.Text.Encoding]::ASCII)
-
-        Write-Build Yellow "Scoop base installation not found. Created fallback script shim at $cmdShim"
+        Write-Build Cyan "$InstallPath is already on the user PATH."
     }
 
-    Write-Build Green "Successfully deployed bmc to Scoop app directory: $appDir"
+    # 5. Post-install diagnostics
+    $policy = Get-ExecutionPolicy
+    if ($policy -in 'Restricted', 'AllSigned') {
+        Write-Build Yellow "Effective execution policy is '$policy': 'bmc' will not run from PowerShell. Use the bmc.cmd launcher, or run: Set-ExecutionPolicy -Scope CurrentUser RemoteSigned (Group Policy may forbid it)."
+    }
+
+    $userConfig = Join-Path -Path $BmcDataPath -ChildPath 'bmc.config.json'
+    if (-not (Test-Path -LiteralPath $userConfig)) {
+        Write-Build Yellow "No $userConfig yet. Copy bmc.config.sample.json to bmc.config.json and set detection.officeDnsSuffixPattern."
+    }
+
+    Write-Build Green "Installed bmc (SHA-256 verified) to $InstallPath"
+}
+
+# Remove what Install deployed. The PATH entry, config and state are intentionally kept.
+task Uninstall {
+    remove (Join-Path -Path $InstallPath -ChildPath 'bmc.ps1'), (Join-Path -Path $InstallPath -ChildPath 'bmc.cmd')
+    Write-Build Green "Removed bmc from $InstallPath"
+    Write-Build Cyan "Left in place: user PATH entry, $BmcDataPath (config and state). Delete them manually if unwanted."
 }
 
 # Default target pipeline

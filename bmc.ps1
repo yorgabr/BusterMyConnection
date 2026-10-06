@@ -257,6 +257,7 @@ function Set-BmcNexusConfig {
         Points package managers at the corporate Nexus mirrors (enabled) or restores defaults
         (disabled), driven by the per-scenario 'nexus' boolean and the 'nexus' index URLs.
     #>
+    [CmdletBinding(SupportsShouldProcess = $true)]
     param(
         [Parameter(Mandatory = $true)]
         $Config,
@@ -264,6 +265,11 @@ function Set-BmcNexusConfig {
         [Parameter(Mandatory = $true)]
         [bool] $Enabled
     )
+
+    $nexusAction = if ($Enabled) { 'Point package managers at Nexus' } else { 'Restore default package indexes' }
+    if (-not $PSCmdlet.ShouldProcess('pip/uv/npm index configuration', $nexusAction)) {
+        return
+    }
 
     $pypiIndex = $Config.nexus.pypiIndexUrl
     $npmReg    = $Config.nexus.npmRegistryUrl
@@ -314,12 +320,18 @@ function Set-BmcToolProxy {
         When set, Git credential handling is left to the current Windows user; no proxy credentials
         are embedded in the Git config (Px handles SSO upstream).
     #>
+    [CmdletBinding(SupportsShouldProcess = $true)]
     param(
         [string] $ProxyUrl,
         [bool] $UseCurrentUserCredentials = $true
     )
 
     $isDirect = [string]::IsNullOrWhiteSpace($ProxyUrl)
+
+    $proxyAction = if ($isDirect) { 'Clear proxy settings (Direct Access)' } else { "Set proxy to $ProxyUrl" }
+    if (-not $PSCmdlet.ShouldProcess('Scoop, Git and npm proxy settings', $proxyAction)) {
+        return
+    }
 
     # --- Scoop ---
     if (Get-Command -Name 'scoop' -ErrorAction SilentlyContinue) {
@@ -882,8 +894,8 @@ function Start-BmcOrchestration {
 
     # Verifies every tool once the environment is configured (read-only; see Test-BmcToolAccess).
     $checkTools = {
-        param([string] $EffectiveProxy, [bool] $NexusOn)
-        if (-not $SkipToolCheck) {
+        param([string] $EffectiveProxy, [bool] $NexusOn, [bool] $Skip)
+        if (-not $Skip) {
             $null = Test-BmcToolAccess -Config $config -ProxyUrl $EffectiveProxy -NexusEnabled $NexusOn
         }
     }
@@ -893,7 +905,7 @@ function Start-BmcOrchestration {
         Out-Warn "No corporate PAC file detected in Windows Registry."
         Enable-BmcDirectAccess
         Set-BmcNexusConfig -Config $config -Enabled $false
-        & $checkTools '' $false
+        & $checkTools '' $false $SkipToolCheck.IsPresent
         return
     }
 
@@ -908,7 +920,7 @@ function Start-BmcOrchestration {
         Enable-BmcDirectAccess
         $nexusOn = [bool]$scenarioConfig.nexus
         Set-BmcNexusConfig -Config $config -Enabled $nexusOn
-        & $checkTools '' $nexusOn
+        & $checkTools '' $nexusOn $SkipToolCheck.IsPresent
         return
     }
 
@@ -918,7 +930,7 @@ function Start-BmcOrchestration {
         Out-Warn "PAC file endpoint is unreachable. Corporate proxy might be unavailable."
         Enable-BmcDirectAccess
         Set-BmcNexusConfig -Config $config -Enabled $false
-        & $checkTools '' $false
+        & $checkTools '' $false $SkipToolCheck.IsPresent
         return
     }
 
@@ -938,7 +950,7 @@ function Start-BmcOrchestration {
             Out-Err "Failed to start Px Proxy."
             Enable-BmcDirectAccess
             Set-BmcNexusConfig -Config $config -Enabled $false
-            & $checkTools '' $false
+            & $checkTools '' $false $SkipToolCheck.IsPresent
             return
         }
     }
@@ -953,7 +965,7 @@ function Start-BmcOrchestration {
     Set-BmcNexusConfig -Config $config -Enabled $nexusEnabled
 
     # 7. Verify that every tool reaches its target through the configured route.
-    & $checkTools "http://127.0.0.1:$LocalPort" $nexusEnabled
+    & $checkTools "http://127.0.0.1:$LocalPort" $nexusEnabled $SkipToolCheck.IsPresent
 }
 
 # --- DotSource Guard ---

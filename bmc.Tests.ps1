@@ -307,6 +307,14 @@ Describe 'BusterMyConnection (bmc) - Unit Test Suite' {
             }
         }
 
+        It 'Changes nothing under -WhatIf' {
+            Mock Get-Command { return [PSCustomObject]@{ Name = $Name } } -ParameterFilter { $Name -in @('scoop', 'git', 'npm') }
+
+            Set-BmcToolProxy -ProxyUrl 'http://127.0.0.1:3128' -WhatIf
+
+            Should -Invoke Invoke-BmcCli -Times 0 -Exactly
+        }
+
         It 'Warns instead of reporting success when Scoop returns a non-zero exit code' {
             Mock Get-Command { return $null } -ParameterFilter { $Name -in @('git', 'npm', 'uv') }
             Mock Get-Command { return [PSCustomObject]@{ Name = 'scoop' } } -ParameterFilter { $Name -eq 'scoop' }
@@ -351,6 +359,12 @@ Describe 'BusterMyConnection (bmc) - Unit Test Suite' {
                 $Tool -eq 'npm' -and
                 ($Arguments -join ' ') -eq 'config set registry https://nexus.corp.example.com/repository/npm-group/'
             }
+        }
+
+        It 'Changes nothing under -WhatIf' {
+            Set-BmcNexusConfig -Config $script:cfg -Enabled $true -WhatIf
+
+            Should -Invoke Invoke-BmcCli -Times 0 -Exactly
         }
 
         It 'Restores the default npm registry when disabled' {
