@@ -1,5 +1,7 @@
 # BusterMyConnection (bmc)
 
+![Banner](docs/images/banner.webp)
+
 ![PowerShell 5.1+](https://img.shields.io/badge/PowerShell-5.1%2B-blue.svg)
 ![Platform](https://img.shields.io/badge/Platform-Windows-informational.svg)
 ![License](https://img.shields.io/badge/License-GPL--3.0-green.svg)
