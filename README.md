@@ -1,110 +1,180 @@
-# BusterMyConnection
+# BusterMyConnection (bmc)
 
-docs/images/banner.webp  
-CI
-<https://img.shields.io/badge/PowerShell-5.1%2B-blue.svg>
-Platform
-<https://img.shields.io/badge/License-GPL--3.0-green.svg>
+![PowerShell 5.1+](https://img.shields.io/badge/PowerShell-5.1%2B-blue.svg)
+![Platform](https://img.shields.io/badge/Platform-Windows-informational.svg)
+![License](https://img.shields.io/badge/License-GPL--3.0-green.svg)
 
-## The Self‑Healing CNTLM Launcher for Windows
+## The Self-Healing Px Proxy Orchestrator for Windows
 
-There comes a moment in every Windows developer’s life when corporate proxy servers cease to be a background nuisance and become an active impediment to productivity. CNTLM may be correctly configured, authentication may be valid, and yet a single environmental change — a VPN reconnect, a PAC file injected by a local agent, or an upstream proxy outage — is enough to bring every tool to a grinding halt.
+There comes a moment in every Windows developer's life when the corporate proxy stops being a
+background nuisance and becomes an active impediment to productivity. Authentication may be valid,
+the proxy may be correctly declared, and yet a single environmental change — a VPN reconnect, a PAC
+file injected by a local agent, or an upstream outage — is enough to bring every tool to a halt.
 
-**Buster‑MyConnection** exists to confront this fragility head‑on.
+**BusterMyConnection** confronts this fragility head-on. It is not a credential helper and it does
+not depend on legacy tools such as CNTLM. Instead, it orchestrates [**Px Proxy**](https://github.com/genotrance/px),
+a modern HTTP proxy with automatic Windows Single Sign-On (SSO), Kerberos, NTLM and PAC-file
+evaluation. `bmc` detects your network context, provisions and starts Px when appropriate, and
+reconciles the proxy configuration of every tool you use — then steps aside cleanly when the proxy
+is unavailable.
 
-This script is not merely a CNTLM launcher. It is an orchestration layer that understands that real corporate networks are unstable systems. Proxies fail. VPNs override configuration. Environment variables linger longer than they should. And developers are often left debugging symptoms instead of causes.
-
-Buster‑MyConnection adopts a different philosophy: *graceful degradation* backed by memory. When the proxy is healthy, it enables CNTLM and ensures the environment is correctly configured. When the proxy is dead, it decisively steps aside — removing proxy environment variables, enabling direct internet access, and preserving enough state to recover later without user intervention.
-
-The result is not cleverness for its own sake, but continuity. Tools continue to work. Transitions feel intentional rather than accidental. And the script can be run repeatedly, safely, without fear of accumulating side effects.
+The result is continuity: tools keep working, transitions feel intentional, and the command can be
+run repeatedly and safely without accumulating side effects.
 
 ***
 
 ## The Architecture of Resilience
 
-At its core, Buster‑MyConnection follows a structured decision process.
+At its core, `bmc` follows a structured decision process on every run.
 
-**First**, it verifies infrastructure. If CNTLM is not present at the configured path, the script installs it via [Scoop](https://scoop.sh) (`scoop install cntlm`), which requires no administrative privileges, resolves the package over HTTPS, and verifies it against Scoop's manifest hash. Scoop itself must already be installed and on `PATH`; the script does not bootstrap Scoop for you.
+**First**, it reads the corporate PAC URL from the Windows Internet Settings registry key. The PAC
+URL is the primary signal that you are inside a corporate environment.
 
-**Second**, it resolves configuration. An existing `cntlm.ini` is located via explicit path or discovery. If none exists, the script launches an interactive wizard that validates input, explains security trade‑offs, and produces a usable, well‑commented configuration file with sensible defaults.
+**Second**, it classifies the active **scenario** — `Vpn`, `Office` or `Home` — using the patterns
+in your configuration:
 
-**Third**, it evaluates viability. Before starting CNTLM, the script performs a TCP health check against the upstream proxy declared in the configuration. This check is deliberate: the goal is not to confirm general network availability, but to validate that the specific proxy endpoint CNTLM depends upon is actually responsive.
+- `Vpn` when an active network adapter matches `detection.vpnAdapterPattern` (e.g. `F5|BIG-IP`).
+- `Office` when a connection-specific DNS suffix matches `detection.officeDnsSuffixPattern`.
+- `Office` when no pattern matched but the corporate PAC endpoint is reachable without a proxy
+  (that server is only reachable from inside the network, so reaching it is strong evidence). This
+  probe can be disabled with `detection.pacProbe = false`.
+- `Home` otherwise.
 
-If the upstream proxy is unreachable, Buster‑MyConnection chooses restraint. CNTLM is *not* started. Instead, all proxy‑related environment variables are removed from the current process scope, enabling direct internet access and preventing application‑level deadlocks. The removal is not destructive: the original values are captured and persisted for later restoration.
+**Third**, it evaluates viability. If a PAC exists and the scenario calls for proxying, `bmc`
+performs an HTTP reachability check against the PAC endpoint before committing to proxy mode. If the
+endpoint is unreachable, or no PAC is present, or the scenario requests `proxy = none`, `bmc`
+chooses restraint and switches to **Direct Access**.
 
-When connectivity returns — whether through VPN reconnection or proxy recovery — a subsequent execution detects the prior Direct Access state and restores the saved variables automatically.
+When proxy mode is viable, `bmc` provisions Px via Scoop if needed, starts it against the discovered
+PAC (`px --pac=<url> --listen=127.0.0.1 --port=<port>`), exports the process-scoped proxy
+variables, and reconfigures each tool to route through `http://127.0.0.1:<port>`.
 
 ***
 
-## VPN Detection as a Chain of Responsibility
+## Scenario-Aware Tool Reconfiguration
 
-Corporate VPNs frequently alter proxy behavior in subtle, vendor‑specific ways. Buster‑MyConnection addresses this variability through a **chain‑based detection system** implemented using plain PowerShell functions.
+POSIX environment variables alone are insufficient: every tool has its own proxy and index
+mechanism. For the active scenario, `bmc` reconciles:
 
-Each detector in the chain attempts to recognize a specific VPN client (such as BIG‑IP Edge Client or Cisco AnyConnect) using reliable environmental indicators — registry values, local PAC servers, or running processes. When a detector succeeds, it returns a structured result that includes both identification and a reconciliation action.
-
-That action is a script block, executed only when standard operation is intended, which updates `cntlm.ini` to reflect the effective system proxy configuration introduced by the VPN. If a detector fails, responsibility passes transparently to the next detector in the chain.
-
-This design is intentionally extensible: adding support for a new VPN does not require modifying existing detectors. You simply insert a new function into the chain.
+- **Scoop** — `scoop config proxy host:port` (scheme stripped), cleared in Direct Access.
+- **Git** — `git config --global http.proxy <url>`; the non-existent `https.proxy` key is always
+  removed so stale entries from older versions are cleaned up. Credentials are left to the current
+  Windows user (Px handles SSO upstream).
+- **npm** — `proxy` and `https-proxy`, cleared in Direct Access.
+- **uv / pip** — the `HTTP(S)_PROXY` / `UV_INDEX_URL` / `PIP_INDEX_URL` process variables.
 
 ***
 
-## Credentials and Proxy URLs
+## Nexus Mirror Selection and First-Run Auto-Discovery
 
-NTLM authentication is domain-aware: CNTLM and the corporate proxy expect an identity of the form `DOMAIN\user`. An HTTP proxy URL, however, is not. When Buster-MyConnection exports `HTTP_PROXY` for corporate mode, it deliberately strips the domain component and URL-encodes the remaining `user:password`, producing `http://user:password@proxy:port`. This matters because a backslash in the userinfo segment leads Git and libcurl to interpret the URL as containing a path — a construct only SOCKS proxies accept — which previously caused `fatal: ... only SOCKS proxies support paths`. The domain still participates in authentication through the credential object passed to the underlying request; it simply never appears in the URL.
+Each scenario carries a `nexus` boolean. When enabled, `bmc` points pip/uv and npm at your corporate
+[Sonatype Nexus](https://www.sonatype.com/products/sonatype-nexus-repository) mirrors; when disabled
+(or whenever Direct Access is in effect) it restores the public indexes. Direct Access always
+implies public indexes, because the whitelisted corporate Nexus is unreachable off-network.
+
+On the **first run**, when no configuration file exists yet and a corporate PAC is present, `bmc`
+attempts to discover your Nexus automatically, in order:
+
+1. **Inheritance** — reads your existing npm/pip/uv configuration and accepts only URLs carrying the
+   Sonatype signature (`/repository/` or `/nexus/`); public registries and loopback are rejected.
+2. **REST introspection** — when a base host is known but a format is missing, `bmc` queries
+   `{base}/service/rest/v1/status` and `{base}/service/rest/v1/repositories` (direct / NO_PROXY) and
+   selects per format by priority `group > proxy > hosted`.
+3. **Interactive fallback** — only on an interactive host, it asks for the Nexus base URL and, if
+   introspection fails, for the full PyPI and npm URLs.
+
+The resulting `bmc.config.json` is materialised under `%LOCALAPPDATA%\bmc`. An existing config is
+never overwritten.
 
 ***
 
 ## State Persistence and Recovery
 
-One of the script’s most consequential behaviors occurs during failure.
+`bmc` treats environment mutation as a reversible operation. When it enters Direct Access it captures
+the proxy-related process variables before clearing them, and when it enters proxy mode it records
+the active proxy. The snapshot is serialized (UTF-8, no BOM) to:
 
-When Buster‑MyConnection determines that proxy mode is unsafe, it transitions explicitly into **Direct Access mode**. Before removing any proxy environment variables, it captures a snapshot of all proxy‑related entries present in the current process. That snapshot is serialized and stored under:
+    %LOCALAPPDATA%\bmc\state.json
 
-    %LOCALAPPDATA%\Buster-MyConnection\state.json
-
-On subsequent runs, the script consults this state file. If the previous execution was in Direct Access mode and proxy operation is again viable, the original environment variables are restored before CNTLM is started.
-
-This mechanism ensures symmetry: every automatic removal has a corresponding, automatic restoration. The script remembers not only *what* it did, but *how to undo it*.
+This gives symmetry: every automatic change is recorded so the tool knows what it did and how to
+reason about the next run.
 
 ***
 
-## Diagnostic‑Only Operation: `-JustCheck`
+## Installation
 
-There are moments when insight is required but change is not desired. For these cases, Buster‑MyConnection provides a comprehensive diagnostic mode via the `-JustCheck` switch.
+`bmc` installs per-user, with **no administrator rights**, following Windows PowerShell 5.1
+conventions. From the repository root:
 
-In this mode, the script performs:
+```powershell
+Invoke-Build Install
+```
 
-*   Process discovery for CNTLM on the target listening port
-*   Configuration discovery and parsing of the active `cntlm.ini`
-*   Validation of required directives and authentication posture
-*   HTTP and HTTPS connectivity checks via `curl`, with timeouts and retries
+This stages `dist/`, verifies the SHA-256 of the deployed script, copies `bmc.ps1` and a `bmc.cmd`
+launcher into your `CurrentUser` scripts folder (`<Documents>\WindowsPowerShell\Scripts`), refreshes
+`bmc.config.sample.json` next to your real config, and adds the scripts folder to the user `PATH`.
 
-No remediation actions are taken. No configuration is altered. The script reports what it finds, then exits.
+If your execution policy is `Restricted` or `AllSigned`, run `bmc` through the `bmc.cmd` launcher, or
+set `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` (Group Policy may forbid it).
 
-This makes `-JustCheck` suitable for automation pipelines, pre‑deployment health checks, and troubleshooting scenarios where understanding must precede intervention.
+To remove it:
+
+```powershell
+Invoke-Build Uninstall
+```
+
+Uninstall intentionally leaves your PATH entry, config and state in place; delete them manually if
+unwanted.
+
+***
+
+## Configuration
+
+Copy `bmc.config.sample.json` to `%LOCALAPPDATA%\bmc\bmc.config.json` and set at least
+`detection.officeDnsSuffixPattern` to your real corporate DNS suffix (the shipped template uses the
+reserved `example.com`, which cannot match a real network). Run `bmc -JustCheck` to list the DNS
+suffixes and adapters `bmc` currently sees, so you can write the detection patterns from real data.
+
+***
+
+## Usage
+
+```powershell
+bmc                      # Detect scenario, reconcile proxy/tools, start Px if viable
+bmc -JustCheck           # Read-only diagnostics; never mutates state   (alias: -Check)
+bmc -Port 3129           # Use a different local Px port                (alias: -p)
+bmc -ConfigPath C:\x.json# Use an explicit config file                 (alias: -c)
+bmc -SkipToolCheck       # Skip the post-configuration tool access check
+bmc -Version             # Print the version and exit                  (alias: -v)
+bmc -Help                # Print the full help and exit           (aliases: -h, -?)
+```
+
+### Diagnostic-Only Operation: `-JustCheck`
+
+There are moments when insight is required but change is not. In diagnostic mode `bmc` reports the
+detected scenario, active adapters and DNS suffixes, the PAC URL and its reachability, whether the Px
+binary is present and running, and the last recorded state — then exits without modifying anything.
+This makes `-JustCheck` suitable for automation pipelines and troubleshooting where understanding
+must precede intervention.
 
 ***
 
 ## Exit Codes
 
-The script communicates its outcome through process exit codes, suitable for use in automation and CI pipelines.
-
-| Code | Meaning                                                               |
-| ---: | --------------------------------------------------------------------- |
-|    0 | Success — CNTLM started, or Direct Access mode intentionally activated |
-|    1 | Failure — no viable strategy, failed validation, or a forced mode could not be satisfied |
-
-Earlier releases reserved codes 2 and 3 for wizard and installation failures; these now surface as code 1 with a descriptive error message, keeping the contract simple for callers.
+| Code | Meaning                                                                            |
+| ---: | ---------------------------------------------------------------------------------- |
+|    0 | Success — proxy mode configured, or Direct Access intentionally activated          |
+|    1 | Failure — a critical, unhandled error occurred during orchestration                |
 
 ***
 
 ## Philosophy
 
-Buster‑MyConnection rejects the idea that network tooling must be brittle. Failure is inevitable; deadlocks are not.
-
-When the proxy fails, the script does not linger in a half‑functional state. When a VPN overrides configuration, it reconciles rather than resists. When the environment stabilizes, it restores what it removed without requiring the user to remember what changed.
-
-It is infrastructure that understands its purpose is to *disappear when working correctly* — and to explain itself clearly when it does not.
+BusterMyConnection rejects the idea that network tooling must be brittle. Failure is inevitable;
+deadlocks are not. When the proxy fails, the tool steps aside rather than lingering in a
+half-functional state. When the network stabilizes, a subsequent run reconfigures everything again.
+It is infrastructure that understands its purpose is to *disappear when working correctly* — and to
+explain itself clearly when it does not.
 
 ***
 
