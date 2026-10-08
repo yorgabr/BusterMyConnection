@@ -575,7 +575,12 @@ Describe 'BusterMyConnection (bmc) - Unit Test Suite' {
         It 'Changes nothing under -WhatIf' {
             Mock Get-Command { return [PSCustomObject]@{ Name = $Name } } -ParameterFilter { $Name -in @('scoop', 'git', 'npm') }
 
-            Set-BmcToolProxy -ProxyUrl 'http://127.0.0.1:3128' -WhatIf
+            # ShouldProcess writes the "What if:" line straight to the host in Windows PowerShell 5.1
+            # (it is NOT an Information-stream record there), so a plain 6>$null would not catch it.
+            # Folding every stream (*>&1) into Out-Null consumes that host line while keeping the
+            # build log clean. These -WhatIf tests assert only on invocation counts, never on a
+            # return value, so discarding the merged output is safe.
+            Set-BmcToolProxy -ProxyUrl 'http://127.0.0.1:3128' -WhatIf *>&1 | Out-Null
 
             Should -Invoke Invoke-BmcCli -Times 0 -Exactly
         }
@@ -627,7 +632,9 @@ Describe 'BusterMyConnection (bmc) - Unit Test Suite' {
         }
 
         It 'Changes nothing under -WhatIf' {
-            Set-BmcNexusConfig -Config $script:cfg -Enabled $true -WhatIf
+            # See the note in Set-BmcToolProxy's -WhatIf test: *>&1 | Out-Null swallows the
+            # host-level "What if:" line that ShouldProcess emits under Windows PowerShell 5.1.
+            Set-BmcNexusConfig -Config $script:cfg -Enabled $true -WhatIf *>&1 | Out-Null
 
             Should -Invoke Invoke-BmcCli -Times 0 -Exactly
         }

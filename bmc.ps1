@@ -69,12 +69,29 @@
 
 [CmdletBinding(SupportsShouldProcess = $true)]
 param(
+    # Read-only diagnostic mode. Alias -Check mirrors the common POSIX intent of a dry inspection.
+    [Alias('Check')]
     [switch] $JustCheck,
+
+    # Testing hook; no public alias on purpose (internal contract with the Pester suite).
     [switch] $DotSourceOnly,
+
+    # Local Px listening port. -p is the conventional one-letter alias for a port.
+    [Alias('p')]
     [int] $Port = 3128,
+
+    # Explicit config path override. -c is the conventional one-letter alias for a config file.
+    [Alias('c')]
     [string] $ConfigPath,
+
     [switch] $SkipToolCheck,
+
+    # -v is the near-universal short form for a version query.
+    [Alias('v')]
     [switch] $Version,
+
+    # -h and -? are the near-universal short forms for a help query.
+    [Alias('h', '?')]
     [switch] $Help
 )
 
