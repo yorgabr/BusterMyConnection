@@ -1,5 +1,22 @@
 ﻿#Requires -Version 5.1
 
+<#PSScriptInfo
+
+.VERSION 3.2.0
+.GUID 7c9e6a2b-4f1d-4e3a-9b8c-2d5f6a1e0c3d
+.AUTHOR Yorga Babuscan
+.COMPANYNAME Yorga Babuscan
+.COPYRIGHT (c) Yorga Babuscan <yorgabr@gmail.com>. All rights reserved.
+.TAGS proxy px pac corporate network windows scoop git npm uv nexus
+.LICENSEURI https://github.com/yorgabr/BusterMyConnection/blob/main/LICENSE
+.PROJECTURI https://github.com/yorgabr/BusterMyConnection
+.ICONURI
+.EXTERNALMODULEDEPENDENCIES
+.REQUIREDSCRIPTS
+.EXTERNALSCRIPTDEPENDENCIES
+.RELEASENOTES Adds first-run Nexus auto-discovery (inherits from npm/pip/uv configs, then interactive fallback with Nexus REST API introspection), -Version/-Help switches, invariant Direct-Access to Nexus-off, and silenced native tool output.
+#>
+
 <#
 .SYNOPSIS
     BusterMyConnection (bmc) - Self-healing Px Proxy orchestrator for Windows.
@@ -16,9 +33,11 @@
     5. Graceful fallback (direct access mode).
     6. State persistence & environmental symmetry.
     7. Scenario-aware tool reconfiguration (Scoop, Git, npm, uv) and Nexus mirror selection.
+    8. First-run Nexus auto-discovery (inherits from existing npm/pip/uv config; interactive
+       fallback with Sonatype Nexus REST API introspection).
 
 .PARAMETER JustCheck
-    Executes in read-only diagnostic mode.
+    Executes in read-only diagnostic mode. Never creates or mutates the configuration file.
 
 .PARAMETER DotSourceOnly
     Exits execution immediately after loading function definitions into session scope.
@@ -32,7 +51,14 @@
 
 .PARAMETER ConfigPath
     Path to the bmc JSON configuration file. Defaults to %LOCALAPPDATA%\bmc\bmc.config.json.
-    When absent, the built-in template config (Get-BmcTemplateConfig) is used.
+    When absent, the built-in template config (Get-BmcTemplateConfig) is used, and on the first
+    orchestration run bmc attempts to auto-discover the corporate Nexus and materialise the file.
+
+.PARAMETER Version
+    Prints the bmc version and exits without touching the system.
+
+.PARAMETER Help
+    Prints the full help (same content as Get-Help) and exits.
 
 .EXAMPLE
     bmc
@@ -47,11 +73,13 @@ param(
     [switch] $DotSourceOnly,
     [int] $Port = 3128,
     [string] $ConfigPath,
-    [switch] $SkipToolCheck
+    [switch] $SkipToolCheck,
+    [switch] $Version,
+    [switch] $Help
 )
 
 # Global Constants & Paths
-$SCRIPT_VERSION = '3.1.0'
+$SCRIPT_VERSION = '3.2.0'
 $BmcAppDataPath = Join-Path -Path $env:LOCALAPPDATA -ChildPath 'bmc'
 $StateFilePath   = Join-Path -Path $BmcAppDataPath -ChildPath 'state.json'
 $ConfigFilePath  = Join-Path -Path $BmcAppDataPath -ChildPath 'bmc.config.json'
@@ -90,6 +118,8 @@ function Get-BmcTemplateConfig {
         pipeline to emit bmc.config.sample.json.
     .DESCRIPTION
         Uses [ordered] to guarantee deterministic key ordering in the serialized JSON artifact.
+        The placeholder domain is the IANA-reserved example.com so it never collides with a real
+        corporate suffix while still signalling that the user must customise it.
     #>
     return [ordered]@{
         detection = [ordered]@{
@@ -147,6 +177,350 @@ function Get-BmcConfig {
     return (Get-BmcTemplateConfig | ConvertTo-Json -Depth 6 | ConvertFrom-Json)
 }
 
+# --- Nexus Auto-Discovery (first-run) ---------------------------------------
+
+function Get-BmcToolConfigValue {
+    <#
+    .SYNOPSIS
+        Mockable seam that captures stdout from a tool's configuration query (e.g.
+        'npm config get registry', 'pip config list') and returns the output lines.
+    .DESCRIPTION
+        Unlike Invoke-BmcCli, which discards output and returns only the exit code, this seam
+        RETURNS the captured stdout. It exists as its own PowerShell function so Pester can mock it
+        reliably: native executables (npm.cmd, pip.exe) cannot be mocked directly, so routing every
+        config read through here keeps the discovery logic fully testable without ever running the
+        real tools during the suite.
+
+        stderr is redirected to $null and $ErrorActionPreference is forced to 'Continue' so a tool
+        writing diagnostics to stderr never turns into a terminating error under a strict caller.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string] $Tool,
+        [string[]] $Arguments = @()
+    )
+
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $output = & $Tool @Arguments 2>$null
+        return @($output | Where-Object { $_ })
+    }
+    catch {
+        return @()
+    }
+    finally {
+        $ErrorActionPreference = $previous
+    }
+}
+
+function Test-BmcIsNexusUrl {
+    <#
+    .SYNOPSIS
+        Strict signature test: returns $true only for URLs that look like a Sonatype Nexus
+        repository endpoint (path contains /repository/ or /nexus/). Public registries such as
+        registry.npmjs.org and pypi.org, as well as localhost, are rejected.
+    #>
+    param([string] $Url)
+
+    if ([string]::IsNullOrWhiteSpace($Url)) { return $false }
+
+    # Reject the well-known public indexes and loopback outright.
+    if ($Url -match 'registry\.npmjs\.org|(^|\.)pypi\.org|127\.0\.0\.1|localhost') { return $false }
+
+    # Require the Sonatype path signature so we never persist an unrelated mirror.
+    return [bool]($Url -match '/repository/|/nexus/')
+}
+
+function Get-BmcNexusBaseUrl {
+    <#
+    .SYNOPSIS
+        Derives the Nexus application base URL from a repository URL by cutting at the '/repository/'
+        token. This preserves any servlet context prefix (e.g. '/nexus'), so the REST API can be
+        reached at '{base}/service/rest/v1/...'.
+    .EXAMPLE
+        http://host:8180/nexus/repository/npm-group/  ->  http://host:8180/nexus
+        https://host/repository/pypi-group/simple     ->  https://host
+    #>
+    param([Parameter(Mandatory = $true)][string] $RepositoryUrl)
+
+    $idx = $RepositoryUrl.IndexOf('/repository/', [System.StringComparison]::OrdinalIgnoreCase)
+    if ($idx -lt 0) {
+        # No '/repository/' token: treat the input as already being the base (strip trailing slash).
+        return $RepositoryUrl.TrimEnd('/')
+    }
+    return $RepositoryUrl.Substring(0, $idx)
+}
+
+function Invoke-BmcNexusApi {
+    <#
+    .SYNOPSIS
+        Issues a direct (NO_PROXY) GET against the Nexus REST API and returns the parsed JSON, or
+        $null on any failure. Corporate Nexus is whitelisted (NO_PROXY), so the request must never
+        traverse the local Px proxy.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string] $Uri,
+        [int] $TimeoutSeconds = 5
+    )
+
+    try {
+        # Match Test-BmcHttpAccess: force TLS 1.2 on the .NET Framework stack behind PS 5.1.
+        [System.Net.ServicePointManager]::SecurityProtocol =
+            [System.Net.ServicePointManager]::SecurityProtocol -bor [System.Net.SecurityProtocolType]::Tls12
+
+        $request = [System.Net.WebRequest]::Create($Uri)
+        $request.Method  = 'GET'
+        $request.Timeout = $TimeoutSeconds * 1000
+        # Whitelisted host: go direct, bypassing any system/Px proxy.
+        $request.Proxy   = $null
+        $request.UseDefaultCredentials = $true
+
+        $response = $request.GetResponse()
+        try {
+            $stream = $response.GetResponseStream()
+            $reader = New-Object System.IO.StreamReader($stream)
+            $body   = $reader.ReadToEnd()
+            $reader.Close()
+        }
+        finally {
+            $response.Close()
+        }
+
+        if ([string]::IsNullOrWhiteSpace($body)) { return $true }  # 200 with empty body (status probe)
+        return ($body | ConvertFrom-Json)
+    }
+    catch {
+        return $null
+    }
+}
+
+function Resolve-BmcNexusRepository {
+    <#
+    .SYNOPSIS
+        Introspects a Nexus instance via its REST API and returns the preferred pypi index URL and
+        npm registry URL, or $null when the host is not a reachable/healthy Nexus.
+    .DESCRIPTION
+        1. Validates the instance with GET {base}/service/rest/v1/status (expects a 200).
+        2. Lists repositories with GET {base}/service/rest/v1/repositories.
+        3. Selects, per format, by priority group > proxy > hosted; ties broken by the first entry
+           after an ordinal sort on the repository name (deterministic).
+        4. Builds usage URLs: {base}/repository/{name}/simple (pypi) and {base}/repository/{name}/ (npm).
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string] $BaseUrl,
+        [int] $TimeoutSeconds = 5
+    )
+
+    $base = $BaseUrl.TrimEnd('/')
+
+    # 1. Health probe: a non-$null return means the status endpoint answered 200.
+    $status = Invoke-BmcNexusApi -Uri "$base/service/rest/v1/status" -TimeoutSeconds $TimeoutSeconds
+    if ($null -eq $status) {
+        return $null
+    }
+
+    # 2. Enumerate repositories.
+    $repos = Invoke-BmcNexusApi -Uri "$base/service/rest/v1/repositories" -TimeoutSeconds $TimeoutSeconds
+    if ($null -eq $repos -or $repos -isnot [System.Array]) {
+        return $null
+    }
+
+    # Rank maps the Nexus repository 'type' to a selection priority (higher wins).
+    $rank = @{ 'group' = 3; 'proxy' = 2; 'hosted' = 1 }
+
+    $pick = {
+        param($Format)
+        $candidates = @($repos | Where-Object { $_.format -eq $Format })
+        if ($candidates.Count -eq 0) { return $null }
+        # Order by priority desc, then by name asc for a deterministic tie-break.
+        $best = $candidates |
+            Sort-Object -Property @{ Expression = { $rank[$_.type] }; Descending = $true },
+                                  @{ Expression = { $_.name }; Descending = $false } |
+            Select-Object -First 1
+        return $best.name
+    }
+
+    $pypiRepo = & $pick 'pypi'
+    $npmRepo  = & $pick 'npm'
+
+    if (-not $pypiRepo -and -not $npmRepo) {
+        return $null
+    }
+
+    return [PSCustomObject]@{
+        PypiIndexUrl   = if ($pypiRepo) { "$base/repository/$pypiRepo/simple" } else { $null }
+        NpmRegistryUrl = if ($npmRepo)  { "$base/repository/$npmRepo/" }        else { $null }
+    }
+}
+
+function Get-BmcInheritedNexus {
+    <#
+    .SYNOPSIS
+        Primary discovery: reads npm/pip/uv configuration and returns any corporate Nexus URLs that
+        pass the strict Sonatype signature test. Returns an object with PypiIndexUrl/NpmRegistryUrl
+        (either may be $null when not found).
+    .DESCRIPTION
+        All tool reads go through the mockable Get-BmcToolConfigValue seam so the suite never runs
+        the real npm/pip and never inherits the developer machine's live corporate configuration.
+    #>
+    $pypi = $null
+    $npm  = $null
+
+    # --- npm registry ---
+    if (Get-Command -Name 'npm' -ErrorAction SilentlyContinue) {
+        $value = (Get-BmcToolConfigValue -Tool 'npm' -Arguments @('config', 'get', 'registry') | Select-Object -First 1)
+        if ($value) { $value = $value.Trim() }
+        if (Test-BmcIsNexusUrl -Url $value) { $npm = $value }
+    }
+
+    # --- uv / pip index (environment variables take precedence) ---
+    foreach ($var in @('UV_INDEX_URL', 'PIP_INDEX_URL')) {
+        $candidate = [Environment]::GetEnvironmentVariable($var, 'Process')
+        if (Test-BmcIsNexusUrl -Url $candidate) { $pypi = $candidate.Trim(); break }
+    }
+
+    # --- pip config list (fallback when the env vars are unset) ---
+    if (-not $pypi -and (Get-Command -Name 'pip' -ErrorAction SilentlyContinue)) {
+        $lines = Get-BmcToolConfigValue -Tool 'pip' -Arguments @('config', 'list')
+        foreach ($line in $lines) {
+            # Expected form: global.index-url='http://nexus.../simple'
+            if ($line -match "index-url\s*=\s*'?`"?([^'`"]+)'?`"?") {
+                $candidate = $Matches[1].Trim()
+                if (Test-BmcIsNexusUrl -Url $candidate) { $pypi = $candidate; break }
+            }
+        }
+    }
+
+    return [PSCustomObject]@{ PypiIndexUrl = $pypi; NpmRegistryUrl = $npm }
+}
+
+function Get-BmcNexusDiscovery {
+    <#
+    .SYNOPSIS
+        Resolves the corporate Nexus pypi/npm URLs on first run, without a config file present.
+    .DESCRIPTION
+        Strategy (in order):
+          1. Inherit from existing npm/pip/uv config (strict Sonatype signature).
+          2. If a base host is known but a format is missing, complete it via REST introspection
+             (Resolve-BmcNexusRepository), direct/NO_PROXY.
+          3. Interactive fallback (only when the host is interactive): ask for the Nexus base URL;
+             a full /repository/ URL is used as-is, otherwise introspect the base. If introspection
+             fails, prompt for the full pypi and npm URLs (option A).
+        Returns an object with PypiIndexUrl and NpmRegistryUrl; either may remain $null, in which
+        case the caller keeps the template placeholders and warns.
+    .PARAMETER Interactive
+        Overridable gate for testing; defaults to [Environment]::UserInteractive.
+    #>
+    param(
+        [bool] $Interactive = [Environment]::UserInteractive
+    )
+
+    # 1. Primary: inherit from tool configuration.
+    $inherited = Get-BmcInheritedNexus
+    $pypi = $inherited.PypiIndexUrl
+    $npm  = $inherited.NpmRegistryUrl
+
+    if ($pypi -and $npm) {
+        Out-Succ "Nexus auto-discovered from existing tool configuration."
+        return [PSCustomObject]@{ PypiIndexUrl = $pypi; NpmRegistryUrl = $npm }
+    }
+
+    # 2. Partial inheritance: complete the missing format via REST introspection on the known base.
+    if ($pypi -or $npm) {
+        $knownUrl = if ($npm) { $npm } else { $pypi }
+        $base = Get-BmcNexusBaseUrl -RepositoryUrl $knownUrl
+        Out-Info "Completing Nexus discovery via REST introspection at $base ..."
+        $resolved = Resolve-BmcNexusRepository -BaseUrl $base
+        if ($resolved) {
+            if (-not $pypi -and $resolved.PypiIndexUrl)   { $pypi = $resolved.PypiIndexUrl }
+            if (-not $npm  -and $resolved.NpmRegistryUrl) { $npm  = $resolved.NpmRegistryUrl }
+        }
+        if ($pypi -and $npm) {
+            Out-Succ "Nexus auto-discovered (inheritance + REST introspection)."
+            return [PSCustomObject]@{ PypiIndexUrl = $pypi; NpmRegistryUrl = $npm }
+        }
+    }
+
+    # 3. Interactive fallback.
+    if (-not $Interactive) {
+        Out-Warn "Nexus could not be auto-discovered and the session is non-interactive."
+        return [PSCustomObject]@{ PypiIndexUrl = $pypi; NpmRegistryUrl = $npm }
+    }
+
+    Out-Info "Nexus not found automatically. Enter the corporate Nexus base URL (blank to skip):"
+    $answer = (Read-Host -Prompt 'Nexus base URL')
+    if ([string]::IsNullOrWhiteSpace($answer)) {
+        Out-Warn "No Nexus URL provided; keeping placeholders."
+        return [PSCustomObject]@{ PypiIndexUrl = $pypi; NpmRegistryUrl = $npm }
+    }
+    $answer = $answer.Trim()
+
+    # If the user pasted a full repository URL, use it directly for its matching format.
+    if ($answer -match '/repository/') {
+        if ($answer -match '/repository/[^/]*pypi' -or $answer -match 'simple') { $pypi = $answer }
+        else { $npm = $answer }
+    }
+
+    # Introspect the base to fill whatever is still missing.
+    if (-not ($pypi -and $npm)) {
+        $base = Get-BmcNexusBaseUrl -RepositoryUrl $answer
+        $resolved = Resolve-BmcNexusRepository -BaseUrl $base
+        if ($resolved) {
+            if (-not $pypi -and $resolved.PypiIndexUrl)   { $pypi = $resolved.PypiIndexUrl }
+            if (-not $npm  -and $resolved.NpmRegistryUrl) { $npm  = $resolved.NpmRegistryUrl }
+        }
+    }
+
+    # Option A: if introspection could not complete, ask for the full URLs explicitly.
+    if (-not $pypi) {
+        $p = (Read-Host -Prompt 'Full Nexus PyPI index URL (blank to skip)')
+        if (-not [string]::IsNullOrWhiteSpace($p)) { $pypi = $p.Trim() }
+    }
+    if (-not $npm) {
+        $n = (Read-Host -Prompt 'Full Nexus npm registry URL (blank to skip)')
+        if (-not [string]::IsNullOrWhiteSpace($n)) { $npm = $n.Trim() }
+    }
+
+    if ($pypi -or $npm) {
+        Out-Succ "Nexus configured from interactive input."
+    } else {
+        Out-Warn "Nexus still unresolved; keeping placeholders."
+    }
+    return [PSCustomObject]@{ PypiIndexUrl = $pypi; NpmRegistryUrl = $npm }
+}
+
+function Save-BmcInitialConfig {
+    <#
+    .SYNOPSIS
+        Materialises the first %LOCALAPPDATA%\bmc\bmc.config.json from the template, overlaying the
+        discovered Nexus URLs (when present). Writes UTF-8 without BOM, matching the state file.
+    #>
+    param(
+        [Parameter(Mandatory = $true)] $Discovery,
+        [string] $Path = $ConfigFilePath
+    )
+
+    $config = Get-BmcTemplateConfig
+    if ($Discovery.PypiIndexUrl)   { $config.nexus.pypiIndexUrl   = $Discovery.PypiIndexUrl }
+    if ($Discovery.NpmRegistryUrl) { $config.nexus.npmRegistryUrl = $Discovery.NpmRegistryUrl }
+
+    $dir = Split-Path -Path $Path -Parent
+    $resolvedDir = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($dir)
+    if (-not (Test-Path -LiteralPath $resolvedDir)) {
+        $null = New-Item -ItemType Directory -Path $resolvedDir -Force
+    }
+
+    $json = $config | ConvertTo-Json -Depth 6
+    $resolvedPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)
+    [System.IO.File]::WriteAllText($resolvedPath, $json + "`r`n", (New-Object System.Text.UTF8Encoding($false)))
+
+    if ($Discovery.PypiIndexUrl -and $Discovery.NpmRegistryUrl) {
+        Out-Succ "Wrote initial configuration with auto-discovered Nexus to: $Path"
+    } else {
+        Out-Warn "Wrote initial configuration to $Path with placeholder Nexus URLs. Edit the 'nexus' block with your corporate Nexus (pypiIndexUrl, npmRegistryUrl)."
+    }
+}
+
 # Scenario Detection (Office / Vpn / Home)
 function Get-BmcScenario {
     <#
@@ -190,8 +564,13 @@ function Get-BmcScenario {
 
     # 2. Office detection: inspect connection-specific DNS suffixes.
     if ($officePattern) {
-        if ($officePattern -match 'example') {
-            Out-Warn "detection.officeDnsSuffixPattern still holds the template placeholder ($officePattern); it cannot match your network. Set the real DNS suffix in your bmc config."
+        # The shipped template uses the reserved example.com domain as a placeholder. Warn the user
+        # that it cannot match a real corporate network until they replace it. The test is a literal
+        # wildcard (-like), NOT a regex: the pattern itself contains regex escapes ('\.'), so a
+        # regex -match of 'example\.com' would look for 'example' + one literal dot + 'com' and miss
+        # the escaped 'example\.com' present in the stored pattern. '*example*' is unambiguous.
+        if ($officePattern -like '*example*') {
+            Out-Warn "detection.officeDnsSuffixPattern still holds the template placeholder ($officePattern); it cannot match your real network. Set the real DNS suffix in your bmc config."
         }
         try {
             $suffixes = (Get-DnsClient -ErrorAction SilentlyContinue).ConnectionSpecificSuffix |
@@ -227,10 +606,16 @@ function Invoke-BmcCli {
         Keeping native calls in one function makes them reliably mockable in Pester (mocking
         executables and shims directly let the real scoop/git run during the test suite).
 
-        Windows PowerShell 5.1 detail: with 2>&1 the native stderr lines become ErrorRecord
-        objects, and $ErrorActionPreference = 'Stop' turns the first one into a terminating
-        error even when the tool succeeded. Output is therefore consumed under 'Continue' and
-        the exit code is the single source of truth.
+        Native tools such as `scoop config` and `npm config set` print confirmation lines
+        ("'proxy' has been set to '127.0.0.1:3128'") straight to the host output stream, not to
+        the pipeline. Capturing only the function return value therefore let those lines pollute
+        the terminal and the build transcript. Redirecting every stream (*>&1) into a discarded
+        variable keeps the console clean while the exit code remains the single source of truth.
+
+        Windows PowerShell 5.1 detail: with the merged stream the native stderr lines become
+        ErrorRecord objects, and $ErrorActionPreference = 'Stop' turns the first one into a
+        terminating error even when the tool succeeded. Output is therefore consumed under
+        'Continue' and the exit code is the single source of truth.
     #>
     param(
         [Parameter(Mandatory = $true)]
@@ -242,7 +627,9 @@ function Invoke-BmcCli {
     $previousPreference = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
-        $null = & $Tool @Arguments 2>&1
+        # *>&1 folds success, error, warning, verbose, debug and information streams into one
+        # pipeline so none of them reach the host; the result is swallowed by $null.
+        $null = & $Tool @Arguments *>&1
         return $LASTEXITCODE
     }
     finally {
@@ -885,9 +1272,26 @@ function Start-BmcOrchestration {
 
     Out-Info "--- BusterMyConnection v$SCRIPT_VERSION ---"
 
-    # 0. Load configuration, read the PAC URL and resolve the active network scenario.
-    $config   = Get-BmcConfig -Path $ConfigPath
-    $pacUrl   = Get-BmcPacUrlFromRegistry
+    # 0. Read the PAC URL first; it is the signal that we are in a corporate environment.
+    $pacUrl = Get-BmcPacUrlFromRegistry
+
+    # 0a. First-run Nexus auto-discovery: only when the config file does not yet exist AND a PAC is
+    #     present (corporate indicator). Home-without-PAC skips discovery because the whitelisted
+    #     corporate Nexus is unreachable from outside the network anyway. -JustCheck never gets here.
+    if (($ConfigPath -eq $ConfigFilePath) -and (-not (Test-Path -LiteralPath $ConfigPath))) {
+        if ($pacUrl) {
+            Out-Info "No configuration found. Attempting first-run Nexus auto-discovery..."
+            $discovery = Get-BmcNexusDiscovery
+            Save-BmcInitialConfig -Discovery $discovery -Path $ConfigPath
+        } else {
+            Out-Warn "No configuration and no corporate PAC detected; writing a template config with placeholder Nexus URLs."
+            Save-BmcInitialConfig -Discovery ([PSCustomObject]@{ PypiIndexUrl = $null; NpmRegistryUrl = $null }) -Path $ConfigPath
+        }
+    }
+
+    # 0b. Load configuration (reads the file just materialised, or a preexisting one).
+    $config = Get-BmcConfig -Path $ConfigPath
+    Out-Info "Configuration loaded from $ConfigPath"
     $scenario = Get-BmcScenario -Config $config -PacUrl $pacUrl
     Out-Info "Detected network scenario: $scenario"
     $scenarioConfig = $config.scenarios.$scenario
@@ -918,9 +1322,11 @@ function Start-BmcOrchestration {
             Out-Warn "A corporate PAC file is configured but the corporate network was not detected. If you are on it, set detection.officeDnsSuffixPattern in $ConfigFilePath (run bmc -JustCheck to list the DNS suffixes and adapters seen)."
         }
         Enable-BmcDirectAccess
-        $nexusOn = [bool]$scenarioConfig.nexus
-        Set-BmcNexusConfig -Config $config -Enabled $nexusOn
-        & $checkTools '' $nexusOn $SkipToolCheck.IsPresent
+        # Invariant: Direct Access implies the corporate Nexus mirror is unreachable, so package
+        # managers must fall back to the public indexes regardless of the scenario's 'nexus' flag.
+        # This keeps pip/uv/npm working off-network even if the JSON leaves nexus=true for Home.
+        Set-BmcNexusConfig -Config $config -Enabled $false
+        & $checkTools '' $false $SkipToolCheck.IsPresent
         return
     }
 
@@ -970,6 +1376,20 @@ function Start-BmcOrchestration {
 
 # --- DotSource Guard ---
 if ($DotSourceOnly) {
+    return
+}
+
+# --- Informational switches (handled before any orchestration or side effect) ---
+if ($Version) {
+    # Emit the raw version to stdout so it is scriptable (e.g. $v = bmc -Version).
+    Write-Output $SCRIPT_VERSION
+    return
+}
+
+if ($Help) {
+    # Render the comment-based help of this very script. Get-Help reads the help block above;
+    # $PSCommandPath resolves to the running bmc.ps1 regardless of the install location.
+    Get-Help -Name $PSCommandPath -Detailed
     return
 }
 

@@ -1,27 +1,37 @@
 ﻿#Requires -Version 5.1
 
 BeforeAll {
+    # Suppress the PowerShell transcript's echo of handled TerminatingError lines. Pester runs
+    # mocks that deliberately `throw` (e.g. "Registry access denied") and native commands whose
+    # stderr becomes an ErrorRecord; those are caught in production code, but the host transcript
+    # still mirrors them. Switching the error view to CategoryView for the duration of the suite
+    # keeps the clean build log free of >> TerminatingError noise without hiding real assertion
+    # failures (Pester reports those through its own result object, not $Error).
+    $script:PreviousErrorView = $ErrorView
+    $ErrorView = 'CategoryView'
+
     # Import target script definitions without executing the main orchestration flow
     . $PSScriptRoot/bmc.ps1 -DotSourceOnly
 
     # Provide stub command definitions so Pester can mock cmdlets that may not exist on the
     # current host (e.g. Get-NetAdapter / Get-DnsClient on non-Windows CI agents or when the
     # NetTCPIP/DnsClient modules are unavailable). Mocks override these stubs transparently.
+    #
+    # Note: npm/pip/git/scoop are intentionally NOT stubbed here. Native executables cannot be
+    # mocked reliably by Pester, so every read of their configuration goes through the
+    # Get-BmcToolConfigValue / Invoke-BmcCli seams, which ARE mockable. Stubbing the executables
+    # would mask the fact that a test forgot to mock the seam and let the real tool run.
     if (-not (Get-Command -Name 'Get-NetAdapter' -ErrorAction SilentlyContinue)) {
         function Get-NetAdapter { param([switch] $ErrorAction) }
     }
     if (-not (Get-Command -Name 'Get-DnsClient' -ErrorAction SilentlyContinue)) {
         function Get-DnsClient { param([switch] $ErrorAction) }
     }
-    if (-not (Get-Command -Name 'scoop' -ErrorAction SilentlyContinue)) {
-        function scoop { }
-    }
-    if (-not (Get-Command -Name 'git' -ErrorAction SilentlyContinue)) {
-        function git { }
-    }
-    if (-not (Get-Command -Name 'npm' -ErrorAction SilentlyContinue)) {
-        function npm { }
-    }
+}
+
+AfterAll {
+    # Restore the error view the host had before the suite ran.
+    $ErrorView = $script:PreviousErrorView
 }
 
 Describe 'BusterMyConnection (bmc) - Unit Test Suite' {
@@ -32,6 +42,12 @@ Describe 'BusterMyConnection (bmc) - Unit Test Suite' {
         Mock Out-Warn {}
         Mock Out-Err {}
         Mock Out-Succ {}
+    }
+
+    AfterEach {
+        # Drain the error record buffer after each test so handled `throw`s from mocks do not
+        # accumulate and get re-echoed by the enclosing Start-Transcript session.
+        $Error.Clear()
     }
 
     Context 'Get-BmcConfig' {
@@ -61,8 +77,246 @@ Describe 'BusterMyConnection (bmc) - Unit Test Suite' {
         }
     }
 
+    Context 'Test-BmcIsNexusUrl (strict signature)' {
+        It 'Accepts URLs carrying the Sonatype /repository/ signature' {
+            Test-BmcIsNexusUrl -Url 'http://nexus.corp.example.com:8180/nexus/repository/npm-group/' | Should -Be $true
+        }
+
+        It 'Accepts URLs carrying the /nexus/ signature' {
+            Test-BmcIsNexusUrl -Url 'http://host:8180/nexus/content/groups/public/' | Should -Be $true
+        }
+
+        It 'Rejects the public npm registry' {
+            Test-BmcIsNexusUrl -Url 'https://registry.npmjs.org/' | Should -Be $false
+        }
+
+        It 'Rejects the public PyPI index' {
+            Test-BmcIsNexusUrl -Url 'https://pypi.org/simple' | Should -Be $false
+        }
+
+        It 'Rejects loopback and empty values' {
+            Test-BmcIsNexusUrl -Url 'http://127.0.0.1:4873/' | Should -Be $false
+            Test-BmcIsNexusUrl -Url '' | Should -Be $false
+        }
+    }
+
+    Context 'Get-BmcNexusBaseUrl (context-preserving base cut)' {
+        It 'Preserves a servlet context prefix such as /nexus' {
+            Get-BmcNexusBaseUrl -RepositoryUrl 'http://host:8180/nexus/repository/npm-group/' |
+                Should -Be 'http://host:8180/nexus'
+        }
+
+        It 'Cuts at /repository/ when the app is at the root' {
+            Get-BmcNexusBaseUrl -RepositoryUrl 'https://host/repository/pypi-group/simple' |
+                Should -Be 'https://host'
+        }
+
+        It 'Returns the trimmed input when there is no /repository/ token' {
+            Get-BmcNexusBaseUrl -RepositoryUrl 'https://host:8081/nexus/' |
+                Should -Be 'https://host:8081/nexus'
+        }
+    }
+
+    Context 'Resolve-BmcNexusRepository (REST introspection)' {
+        BeforeEach {
+            # A representative /service/rest/v1/repositories payload with ties to exercise the
+            # group > proxy > hosted priority and the deterministic name tie-break.
+            $script:repoPayload = @(
+                [PSCustomObject]@{ name = 'pypi-hosted'; format = 'pypi'; type = 'hosted' }
+                [PSCustomObject]@{ name = 'pypi-proxy';  format = 'pypi'; type = 'proxy' }
+                [PSCustomObject]@{ name = 'pypi-group';  format = 'pypi'; type = 'group' }
+                [PSCustomObject]@{ name = 'npm-proxy';   format = 'npm';  type = 'proxy' }
+                [PSCustomObject]@{ name = 'npm-group';   format = 'npm';  type = 'group' }
+            )
+        }
+
+        It 'Returns $null when the status probe fails' {
+            Mock Invoke-BmcNexusApi { return $null } -ParameterFilter { $Uri -like '*status*' }
+
+            Resolve-BmcNexusRepository -BaseUrl 'http://nexus.corp.example.com:8180/nexus' |
+                Should -BeNullOrEmpty
+        }
+
+        It 'Selects the group repositories and builds the usage URLs' {
+            Mock Invoke-BmcNexusApi { return $true } -ParameterFilter { $Uri -like '*status*' }
+            Mock Invoke-BmcNexusApi { return $script:repoPayload } -ParameterFilter { $Uri -like '*repositories*' }
+
+            $result = Resolve-BmcNexusRepository -BaseUrl 'http://nexus.corp.example.com:8180/nexus'
+
+            $result.PypiIndexUrl   | Should -Be 'http://nexus.corp.example.com:8180/nexus/repository/pypi-group/simple'
+            $result.NpmRegistryUrl | Should -Be 'http://nexus.corp.example.com:8180/nexus/repository/npm-group/'
+        }
+
+        It 'Returns $null when the repository list is unavailable' {
+            Mock Invoke-BmcNexusApi { return $true } -ParameterFilter { $Uri -like '*status*' }
+            Mock Invoke-BmcNexusApi { return $null } -ParameterFilter { $Uri -like '*repositories*' }
+
+            Resolve-BmcNexusRepository -BaseUrl 'http://nexus.corp.example.com:8180/nexus' |
+                Should -BeNullOrEmpty
+        }
+    }
+
+    Context 'Get-BmcInheritedNexus (primary discovery)' {
+        It 'Inherits a Nexus npm registry from npm config' {
+            Mock Get-Command { return [PSCustomObject]@{ Name = 'npm' } } -ParameterFilter { $Name -eq 'npm' }
+            Mock Get-Command { return $null } -ParameterFilter { $Name -eq 'pip' }
+            # Mock the mockable seam, never the npm executable itself.
+            Mock Get-BmcToolConfigValue { return @('http://nexus.corp.example.com:8180/nexus/repository/npm-group/') } -ParameterFilter { $Tool -eq 'npm' }
+
+            # Ensure no inherited PyPI env var bleeds in from the host.
+            [Environment]::SetEnvironmentVariable('UV_INDEX_URL', $null, 'Process')
+            [Environment]::SetEnvironmentVariable('PIP_INDEX_URL', $null, 'Process')
+
+            $result = Get-BmcInheritedNexus
+            $result.NpmRegistryUrl | Should -Be 'http://nexus.corp.example.com:8180/nexus/repository/npm-group/'
+        }
+
+        It 'Ignores a public npm registry (strict filter)' {
+            Mock Get-Command { return [PSCustomObject]@{ Name = 'npm' } } -ParameterFilter { $Name -eq 'npm' }
+            Mock Get-Command { return $null } -ParameterFilter { $Name -eq 'pip' }
+            Mock Get-BmcToolConfigValue { return @('https://registry.npmjs.org/') } -ParameterFilter { $Tool -eq 'npm' }
+
+            $result = Get-BmcInheritedNexus
+            $result.NpmRegistryUrl | Should -BeNullOrEmpty
+        }
+
+        It 'Inherits a Nexus PyPI index from the UV_INDEX_URL environment variable' {
+            Mock Get-Command { return $null } -ParameterFilter { $Name -in @('npm', 'pip') }
+            [Environment]::SetEnvironmentVariable('UV_INDEX_URL', 'http://nexus.corp.example.com:8180/nexus/repository/pypi-group/simple', 'Process')
+            try {
+                $result = Get-BmcInheritedNexus
+                $result.PypiIndexUrl | Should -Be 'http://nexus.corp.example.com:8180/nexus/repository/pypi-group/simple'
+            }
+            finally {
+                [Environment]::SetEnvironmentVariable('UV_INDEX_URL', $null, 'Process')
+            }
+        }
+
+        It 'Inherits a Nexus PyPI index from pip config list when env vars are unset' {
+            Mock Get-Command { return $null } -ParameterFilter { $Name -eq 'npm' }
+            Mock Get-Command { return [PSCustomObject]@{ Name = 'pip' } } -ParameterFilter { $Name -eq 'pip' }
+            Mock Get-BmcToolConfigValue {
+                return @("global.index-url='http://nexus.corp.example.com:8180/nexus/repository/pypi-group/simple'")
+            } -ParameterFilter { $Tool -eq 'pip' }
+
+            [Environment]::SetEnvironmentVariable('UV_INDEX_URL', $null, 'Process')
+            [Environment]::SetEnvironmentVariable('PIP_INDEX_URL', $null, 'Process')
+
+            $result = Get-BmcInheritedNexus
+            $result.PypiIndexUrl | Should -Be 'http://nexus.corp.example.com:8180/nexus/repository/pypi-group/simple'
+        }
+    }
+
+    Context 'Get-BmcNexusDiscovery (orchestration of discovery strategies)' {
+        It 'Returns inherited URLs directly when both formats are present' {
+            Mock Get-BmcInheritedNexus {
+                [PSCustomObject]@{
+                    PypiIndexUrl   = 'http://nexus.corp.example.com:8180/nexus/repository/pypi-group/simple'
+                    NpmRegistryUrl = 'http://nexus.corp.example.com:8180/nexus/repository/npm-group/'
+                }
+            }
+            Mock Resolve-BmcNexusRepository {}
+
+            $result = Get-BmcNexusDiscovery -Interactive $false
+            $result.PypiIndexUrl   | Should -Match 'pypi-group'
+            $result.NpmRegistryUrl | Should -Match 'npm-group'
+            Should -Invoke Resolve-BmcNexusRepository -Times 0 -Exactly
+        }
+
+        It 'Completes a partial inheritance via REST introspection' {
+            Mock Get-BmcInheritedNexus {
+                [PSCustomObject]@{
+                    PypiIndexUrl   = $null
+                    NpmRegistryUrl = 'http://nexus.corp.example.com:8180/nexus/repository/npm-group/'
+                }
+            }
+            Mock Resolve-BmcNexusRepository {
+                [PSCustomObject]@{
+                    PypiIndexUrl   = 'http://nexus.corp.example.com:8180/nexus/repository/pypi-group/simple'
+                    NpmRegistryUrl = 'http://nexus.corp.example.com:8180/nexus/repository/npm-group/'
+                }
+            }
+
+            $result = Get-BmcNexusDiscovery -Interactive $false
+            $result.PypiIndexUrl | Should -Match 'pypi-group'
+            Should -Invoke Resolve-BmcNexusRepository -Times 1 -Exactly -ParameterFilter {
+                $BaseUrl -eq 'http://nexus.corp.example.com:8180/nexus'
+            }
+        }
+
+        It 'Does not prompt when the session is non-interactive' {
+            Mock Get-BmcInheritedNexus { [PSCustomObject]@{ PypiIndexUrl = $null; NpmRegistryUrl = $null } }
+            Mock Read-Host { 'should-not-be-called' }
+
+            $result = Get-BmcNexusDiscovery -Interactive $false
+            $result.PypiIndexUrl   | Should -BeNullOrEmpty
+            $result.NpmRegistryUrl | Should -BeNullOrEmpty
+            Should -Invoke Read-Host -Times 0 -Exactly
+        }
+
+        It 'Uses interactive input and REST introspection when nothing is inherited' {
+            Mock Get-BmcInheritedNexus { [PSCustomObject]@{ PypiIndexUrl = $null; NpmRegistryUrl = $null } }
+            Mock Read-Host { 'http://nexus.corp.example.com:8180/nexus' } -ParameterFilter { $Prompt -eq 'Nexus base URL' }
+            Mock Resolve-BmcNexusRepository {
+                [PSCustomObject]@{
+                    PypiIndexUrl   = 'http://nexus.corp.example.com:8180/nexus/repository/pypi-group/simple'
+                    NpmRegistryUrl = 'http://nexus.corp.example.com:8180/nexus/repository/npm-group/'
+                }
+            }
+
+            $result = Get-BmcNexusDiscovery -Interactive $true
+            $result.PypiIndexUrl   | Should -Match 'pypi-group'
+            $result.NpmRegistryUrl | Should -Match 'npm-group'
+        }
+
+        It 'Falls back to asking for full URLs when introspection fails (option A)' {
+            Mock Get-BmcInheritedNexus { [PSCustomObject]@{ PypiIndexUrl = $null; NpmRegistryUrl = $null } }
+            Mock Read-Host { 'http://nexus.corp.example.com:8180/nexus' } -ParameterFilter { $Prompt -eq 'Nexus base URL' }
+            Mock Resolve-BmcNexusRepository { return $null }
+            Mock Read-Host { 'http://nexus.corp.example.com:8180/nexus/repository/pypi-group/simple' } -ParameterFilter { $Prompt -like 'Full Nexus PyPI*' }
+            Mock Read-Host { 'http://nexus.corp.example.com:8180/nexus/repository/npm-group/' } -ParameterFilter { $Prompt -like 'Full Nexus npm*' }
+
+            $result = Get-BmcNexusDiscovery -Interactive $true
+            $result.PypiIndexUrl   | Should -Match 'pypi-group'
+            $result.NpmRegistryUrl | Should -Match 'npm-group'
+        }
+    }
+
+    Context 'Save-BmcInitialConfig (first-run materialisation)' {
+        BeforeEach {
+            $script:initCfgPath = Join-Path -Path $TestDrive -ChildPath 'bmc\bmc.config.json'
+        }
+
+        It 'Writes the config overlaying discovered Nexus URLs' {
+            $discovery = [PSCustomObject]@{
+                PypiIndexUrl   = 'http://nexus.corp.example.com:8180/nexus/repository/pypi-group/simple'
+                NpmRegistryUrl = 'http://nexus.corp.example.com:8180/nexus/repository/npm-group/'
+            }
+
+            Save-BmcInitialConfig -Discovery $discovery -Path $script:initCfgPath
+
+            Test-Path -LiteralPath $script:initCfgPath | Should -Be $true
+            $written = Get-Content -LiteralPath $script:initCfgPath -Raw | ConvertFrom-Json
+            $written.nexus.pypiIndexUrl   | Should -Be $discovery.PypiIndexUrl
+            $written.nexus.npmRegistryUrl | Should -Be $discovery.NpmRegistryUrl
+            Should -Invoke Out-Succ -Exactly 1
+        }
+
+        It 'Writes placeholders and warns when discovery yielded nothing' {
+            $discovery = [PSCustomObject]@{ PypiIndexUrl = $null; NpmRegistryUrl = $null }
+
+            Save-BmcInitialConfig -Discovery $discovery -Path $script:initCfgPath
+
+            $written = Get-Content -LiteralPath $script:initCfgPath -Raw | ConvertFrom-Json
+            $written.nexus.pypiIndexUrl | Should -Match 'example\.com'
+            Should -Invoke Out-Warn -Exactly 1
+        }
+    }
+
     Context 'Get-BmcScenario' {
         BeforeEach {
+            # Rebuild a fresh config object each test so one test mutating it (e.g. pacProbe=false)
+            # cannot leak into the next.
             $script:cfg = Get-BmcTemplateConfig | ConvertTo-Json -Depth 6 | ConvertFrom-Json
         }
 
@@ -222,6 +476,17 @@ Describe 'BusterMyConnection (bmc) - Unit Test Suite' {
             $ErrorActionPreference = 'Stop'
             $null = Invoke-BmcCli -Tool 'cmd.exe' -Arguments @('/c', 'exit 0')
             $ErrorActionPreference | Should -Be 'Stop'
+        }
+    }
+
+    Context 'Get-BmcToolConfigValue' {
+        It 'Captures and returns the stdout lines of a native command' -Skip:($env:OS -ne 'Windows_NT') {
+            $result = Get-BmcToolConfigValue -Tool 'cmd.exe' -Arguments @('/c', 'echo hello')
+            @($result) -join '' | Should -Match 'hello'
+        }
+
+        It 'Returns an empty collection and does not throw when the tool is missing' {
+            { Get-BmcToolConfigValue -Tool 'definitely-not-a-real-tool-xyz' -Arguments @('x') } | Should -Not -Throw
         }
     }
 
@@ -537,6 +802,11 @@ Describe 'BusterMyConnection (bmc) - Unit Test Suite' {
             Mock Set-BmcNexusConfig {}
             Mock Set-BmcToolProxy {}
             Mock Test-BmcToolAccess { return @() }
+            # Neutralize first-run discovery/materialisation unless a test opts in.
+            Mock Get-BmcNexusDiscovery { return [PSCustomObject]@{ PypiIndexUrl = $null; NpmRegistryUrl = $null } }
+            Mock Save-BmcInitialConfig {}
+            # By default pretend the config file already exists so discovery does not run.
+            Mock Test-Path { return $true } -ParameterFilter { $LiteralPath -eq $ConfigFilePath }
         }
 
         It 'Enables Direct Access when Registry does not contain PAC URL' {
@@ -635,6 +905,42 @@ Describe 'BusterMyConnection (bmc) - Unit Test Suite' {
             Start-BmcOrchestration -LocalPort 3128
 
             Should -Invoke Get-BmcScenario -Times 1 -Exactly -ParameterFilter { $PacUrl -eq 'http://pac.corp.local/proxy.pac' }
+        }
+
+        It 'Runs first-run Nexus discovery only when config is absent and a PAC is present' {
+            # Config absent + PAC present => discovery runs.
+            Mock Test-Path { return $false } -ParameterFilter { $LiteralPath -eq $ConfigFilePath }
+            Mock Get-BmcPacUrlFromRegistry { return 'http://pac.corp.local/proxy.pac' }
+            Mock Test-BmcPacEndpoint { return $false }
+            Mock Enable-BmcDirectAccess {}
+
+            Start-BmcOrchestration -LocalPort 3128
+
+            Should -Invoke Get-BmcNexusDiscovery -Times 1 -Exactly
+            Should -Invoke Save-BmcInitialConfig -Times 1 -Exactly
+        }
+
+        It 'Does not run Nexus discovery when the config file already exists' {
+            Mock Test-Path { return $true } -ParameterFilter { $LiteralPath -eq $ConfigFilePath }
+            Mock Get-BmcPacUrlFromRegistry { return 'http://pac.corp.local/proxy.pac' }
+            Mock Test-BmcPacEndpoint { return $false }
+            Mock Enable-BmcDirectAccess {}
+
+            Start-BmcOrchestration -LocalPort 3128
+
+            Should -Invoke Get-BmcNexusDiscovery -Times 0 -Exactly
+        }
+
+        It 'Skips active Nexus discovery (no PAC) but still writes a placeholder config' {
+            Mock Test-Path { return $false } -ParameterFilter { $LiteralPath -eq $ConfigFilePath }
+            Mock Get-BmcPacUrlFromRegistry { return $null }
+            Mock Enable-BmcDirectAccess {}
+
+            Start-BmcOrchestration -LocalPort 3128
+
+            # No PAC => discovery is not attempted, but a template config is still materialised.
+            Should -Invoke Get-BmcNexusDiscovery -Times 0 -Exactly
+            Should -Invoke Save-BmcInitialConfig -Times 1 -Exactly
         }
     }
 }
